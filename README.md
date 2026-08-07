@@ -184,6 +184,13 @@ makes ill-formed nodes (unknown opcodes, wrong arities, a `#match`
 without a default) unrepresentable, so a compiler backend can target it
 directly and get the laws by construction.
 
+For compiled kernels and other highly shared nouns, the crate also exposes
+`lift_dag` / `NasmDag` / `parse_dag`. This is a versioned, Rust-specific
+serialization envelope beside canonical `.nasm`, not a change to the shared
+IR contract. It writes each structurally unique formula/data node once and
+uses explicit backward references, avoiding expansion of JAM's DAG into an
+impractically large boxed AST or text file.
+
 ```rust
 use nockasm::{expand, noun};
 assert_eq!(expand("(%inc (%self))").unwrap(), noun![4 0 1]);

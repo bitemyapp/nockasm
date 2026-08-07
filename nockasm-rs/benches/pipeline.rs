@@ -17,7 +17,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use nockasm::{cue, expand, jam, lift, nasm_from_jam, parse, Noun, Program};
+use nockasm::{cue, expand, jam, lift, lift_dag, nasm_from_jam, parse, Noun, Program};
 
 fn time_ns(mut f: impl FnMut()) -> (f64, u64) {
     f(); // warmup
@@ -158,6 +158,13 @@ fn main() {
         });
         report(name, "lift", filter, || {
             black_box(lift(black_box(noun)));
+        });
+        report(name, "lift_dag", filter, || {
+            black_box(lift_dag(black_box(noun)).expect("DAG lifts"));
+        });
+        let dag = lift_dag(noun).expect("DAG lifts");
+        report(name, "dag_render", filter, || {
+            black_box(black_box(&dag).render());
         });
         if name == "deep100k" {
             // Tall output is quadratic in size from indentation alone

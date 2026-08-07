@@ -5,8 +5,9 @@
 //!     lower(None, lift(f)) == f                       (lift soundness)
 //!     expand(render(None, lift(f))) == f              (through text)
 //!     render(parse(render(...))) == render(...)       (idempotence)
+//!     parse_dag(lift_dag(f).render()).lower() == f    (DAG soundness)
 
-use nockasm::{cue, expand, jam, lift, lower, parse, render, Atom, Noun};
+use nockasm::{cue, expand, jam, lift, lift_dag, lower, parse, parse_dag, render, Atom, Noun};
 
 struct Rng(u64);
 
@@ -76,6 +77,13 @@ fn lift_is_sound_on_arbitrary_nouns() {
             .unwrap_or_else(|e| panic!("case {i}: re-parse: {e}"))
             .render();
         assert_eq!(text, again, "case {i}: render not idempotent");
+
+        let dag = lift_dag(&f).unwrap_or_else(|e| panic!("case {i}: {e}"));
+        assert_eq!(dag.lower(), f, "case {i}: DAG lift unsound for {f}");
+        let dag_text = dag.render();
+        let reparsed = parse_dag(&dag_text).unwrap_or_else(|e| panic!("case {i}: {e}"));
+        assert_eq!(reparsed, dag, "case {i}: DAG text changed the graph");
+        assert_eq!(reparsed.lower(), f, "case {i}: DAG text unsound for {f}");
         for line in text.lines() {
             // The 76-column rule has exactly one escape valve, same as
             // the reference renderers: an atom wider than the line still

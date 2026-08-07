@@ -9,7 +9,9 @@
 
 mod common;
 
-use nockasm::{cue, expand, jam, lift, lower, nasm_from_jam, noun, parse, render, Noun};
+use nockasm::{
+    cue, expand, jam, lift, lift_dag, lower, nasm_from_jam, noun, parse, parse_dag, render, Noun,
+};
 
 #[test]
 fn round_trip_and_idempotence() {
@@ -52,6 +54,21 @@ fn lift_soundness_over_corpus() {
     }
 }
 
+#[test]
+fn dag_lift_soundness_over_corpus() {
+    for (name, src) in common::corpus() {
+        let formula = expand(&src).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dag = lift_dag(&formula).unwrap_or_else(|e| panic!("{name}: lift_dag: {e}"));
+        assert_eq!(dag.lower(), formula, "{name}: DAG lift is unsound");
+
+        let text = dag.render();
+        let reparsed = parse_dag(&text).unwrap_or_else(|e| panic!("{name}: parse_dag: {e}"));
+        assert_eq!(reparsed, dag, "{name}: DAG text changed the graph");
+        assert_eq!(reparsed.lower(), formula, "{name}: DAG text is unsound");
+        assert_eq!(reparsed.render(), text, "{name}: DAG text is not canonical");
+    }
+}
+
 /// Handmade nouns exercising every lift fallback path
 /// (`tests/test_lift.py::CASES`).
 #[test]
@@ -75,7 +92,31 @@ fn lift_fallback_zoo() {
         assert_eq!(low, f, "{name}: lower(lift) unsound");
         let rt = expand(&render(None, &ast)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(rt, f, "{name}: unsound through text");
+
+        let dag = lift_dag(&f).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(dag.lower(), f, "{name}: DAG lift is unsound");
+        let reparsed = parse_dag(&dag.render()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(reparsed.lower(), f, "{name}: DAG text is unsound");
     }
+}
+
+#[test]
+fn dag_lift_deduplicates_shared_formula_and_data_positions() {
+    let shared_formula = noun![4 0 1];
+    let shared_data = noun![100 200 300];
+    let constant = Noun::cell(1u64, shared_data.clone());
+    let formula = Noun::cell(
+        Noun::cell(shared_formula.clone(), shared_formula),
+        Noun::cell(constant.clone(), constant),
+    );
+
+    let dag = lift_dag(&formula).unwrap();
+    assert_eq!(dag.lower(), formula);
+    assert!(
+        dag.nodes().len() < 20,
+        "shared subtrees should be represented once, got {} nodes",
+        dag.nodes().len()
+    );
 }
 
 #[test]

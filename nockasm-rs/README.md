@@ -30,6 +30,11 @@ assert_eq!(program.lower().unwrap(), noun![8 [1 1] 4 0 2]);
 // Jamfiles: jam / cue / lift
 let bytes = jam(&formula);
 assert_eq!(nockasm::nasm_from_jam(&bytes).unwrap(), "(%eq (%slot 2) (%slot 3))\n");
+
+// Large shared nouns: lift once per unique subtree, not once per occurrence.
+let dag = nockasm::lift_dag(&formula).unwrap();
+assert_eq!(dag.lower(), formula);
+assert_eq!(nockasm::parse_dag(&dag.render()).unwrap(), dag);
 ```
 
 The pipeline and its laws (IR contract version `NASM_VERSION = 3`,
@@ -42,6 +47,8 @@ The pipeline and its laws (IR contract version `NASM_VERSION = 3`,
                              └─ render ─▶ String   (canonical .nasm)
 
 jamfile bytes ─ cue ─▶ Noun ─ lift ─▶ Nasm ─ render ─▶ String
+
+shared Noun ─ lift_dag ─▶ NasmDag ─ render ─▶ DAG text
 ```
 
 - **Round trip**: `expand(render(s, a)) == lower(s, a)`, and rendering
@@ -51,6 +58,18 @@ jamfile bytes ─ cue ─▶ Noun ─ lift ─▶ Nasm ─ render ─▶ String
 - **Serialization**: `cue(&jam(n)) == Ok(n)` for every noun `n`; jam
   deduplicates by structural equality, exactly like the reference
   encoders.
+- **DAG lift soundness**: `lift_dag(f)?.lower() == f`; rendering and
+  parsing the DAG text preserves its nodes and root.
+
+The ordinary `Nasm` tree and canonical `.nasm` renderer stay unchanged
+for cross-implementation compatibility. Compiled kernels are generally
+DAGs, however: expanding JAM backreferences into boxed `Nasm` can consume
+time and memory proportional to an exponentially larger tree. The Rust-only
+`NasmDag` envelope uses stable topological node IDs, deduplicates formula
+and data-position reads independently by structural equality, and emits each
+unique node once. Both `lift_dag` and `NasmDag::render` are O(unique nodes +
+output). The text begins with `:nockasm-dag 1`; `parse_dag` validates that
+all references point backward, so malformed or cyclic graphs are rejected.
 
 ## Types
 
@@ -98,6 +117,7 @@ nockasm program.nasm             # -> program.jam  (raw formula jam)
 nockasm --text program.nasm     # canonical flat noun to stdout
 nockasm --render program.nasm   # canonical .nasm formatting to stdout
 nockasm --lift formula.jam      # -> formula.nasm (deterministic lift)
+nockasm --lift-dag formula.jam  # -> formula.nockasm-dag (preserves sharing)
 ```
 
 ## Testing

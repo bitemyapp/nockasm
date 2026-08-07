@@ -300,6 +300,36 @@ reads as data, which is the honest default.
 backreferences included; a `.jam` file is the jammed atom's bytes,
 little-endian).
 
+### 5.1 DAG-preserving Rust envelope
+
+Canonical `.nasm` and the shared `$nasm` IR are trees. That is appropriate
+for source-sized formulas, but not for fully compiled kernels: JAM
+backreferences can represent a noun DAG whose fully expanded tree is orders
+of magnitude larger than the jamfile. The Rust crate therefore provides a
+separate `NasmDag` envelope through `lift_dag`, `NasmDag::render`, and
+`parse_dag`. It does not change IR version 3 or the cross-implementation
+canonical renderer.
+
+The envelope assigns stable, topologically ordered IDs and writes one line
+per unique node:
+
+```text
+:nockasm-dag 1
+@0 atom 42
+@1 cell @0 @0
+@2 const @1
+@root @2
+```
+
+References must point to earlier IDs, making cycles and forward references
+invalid. Formula-position and data-position memo tables are separate: the
+same noun may correctly be a named opcode in one context and raw data in
+another. Within each context, equality is structural, matching JAM's
+deduplication semantics. Conversion and rendering are O(unique nodes +
+output), and `lift_dag(f).lower() == f` for every noun `f`. The DAG format is
+intended for machine artifacts, profiling, and debugging; tools that require
+portable human-authored `.nasm` should continue to use the ordinary tree IR.
+
 ## 6. Mapping Jock environments to names
 
 Jock's lexical environment at any program point is a subject shape.

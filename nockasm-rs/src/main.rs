@@ -8,14 +8,15 @@
 //! nockasm program.nasm -o out.jam
 //! nockasm --text program.nasm       # canonical flat noun to stdout
 //! nockasm --render program.nasm     # canonical .nasm formatting to stdout
-//! nockasm --lift formula.jam        # -> formula.nasm (deterministic lift)
+//! nockasm --lift formula.jam        # -> formula.nasm (tree lift)
+//! nockasm --lift-dag formula.jam    # -> formula.nockasm-dag
 //! ```
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: nockasm [--text | --render | --lift] [-o PATH] INPUT
+usage: nockasm [--text | --render | --lift | --lift-dag] [-o PATH] INPUT
 
 Nockasm compiler: .nasm source in, Nock formula out (pure Rust).
 
@@ -23,10 +24,11 @@ modes (default: write the formula's jamfile next to the input):
   --text      print the canonical flat noun
   --render    reformat the source to canonical .nasm
   --lift      read INPUT as a jammed formula; emit canonical .nasm
+  --lift-dag  read INPUT as a jammed noun; emit sharing-preserving DAG text
 
 options:
   -o, --output PATH   output path (default: <input>.jam, or <input>.nasm
-                      for --lift; --text/--render default to stdout)
+                      for --lift/--lift-dag; --text/--render default to stdout)
   --version           print the version
   -h, --help          print this help
 ";
@@ -37,6 +39,7 @@ enum Mode {
     Text,
     Render,
     Lift,
+    LiftDag,
 }
 
 struct Cli {
@@ -71,6 +74,7 @@ fn parse_args() -> Result<Option<Cli>, String> {
             "--text" => set_mode(Mode::Text, "--text", &mut mode)?,
             "--render" => set_mode(Mode::Render, "--render", &mut mode)?,
             "--lift" => set_mode(Mode::Lift, "--lift", &mut mode)?,
+            "--lift-dag" => set_mode(Mode::LiftDag, "--lift-dag", &mut mode)?,
             "-o" | "--output" => {
                 let path = args.next().ok_or("-o requires a path")?;
                 output = Some(PathBuf::from(path));
@@ -131,6 +135,18 @@ fn run(cli: Cli) -> Result<(), String> {
                 .output
                 .clone()
                 .unwrap_or_else(|| cli.input.with_extension("nasm"));
+            write(&out, text.as_bytes())
+        }
+        Mode::LiftDag => {
+            let data = read(&cli.input)?;
+            let noun = nockasm::cue(&data).map_err(|e| e.to_string())?;
+            let text = nockasm::lift_dag(&noun)
+                .map_err(|e| e.to_string())?
+                .render();
+            let out = cli
+                .output
+                .clone()
+                .unwrap_or_else(|| cli.input.with_extension("nockasm-dag"));
             write(&out, text.as_bytes())
         }
     }

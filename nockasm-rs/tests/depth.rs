@@ -13,8 +13,8 @@
 //!   flow through them untroubled.
 
 use nockasm::{
-    cue, expand, jam, lift, lower, nasm_from_jam, noun, parse, Error, Nasm, Noun, Op,
-    ParseErrorKind,
+    cue, expand, jam, lift, lift_dag, lower, nasm_from_jam, noun, parse, parse_dag, Error, Nasm,
+    Noun, Op, ParseErrorKind,
 };
 
 const TEST_STACK: usize = 2 * 1024 * 1024;
@@ -127,6 +127,31 @@ fn lift_and_lower_survive_arbitrarily_deep_nouns() {
         })
         .expect("thread spawns");
     handle.join().expect("no stack overflow lifting deep nouns");
+}
+
+#[test]
+fn dag_pipeline_survives_arbitrarily_deep_nouns() {
+    const DEPTH: usize = 100_000;
+    let handle = std::thread::Builder::new()
+        .stack_size(TEST_STACK)
+        .spawn(|| {
+            let mut noun = noun![0 1];
+            for _ in 0..DEPTH {
+                noun = Noun::cell(4u64, noun);
+            }
+            let dag = lift_dag(&noun).expect("DAG lifts");
+            assert_eq!(dag.nodes().len(), DEPTH + 1);
+            assert_eq!(dag.lower(), noun, "DAG lift soundness at depth");
+
+            let text = dag.render();
+            let reparsed = parse_dag(&text).expect("DAG text parses");
+            assert_eq!(reparsed, dag, "DAG text preserves the graph");
+            assert_eq!(reparsed.lower(), noun, "DAG text soundness at depth");
+        })
+        .expect("thread spawns");
+    handle
+        .join()
+        .expect("no stack overflow in the DAG pipeline");
 }
 
 /// `render` (via `nasm_from_jam`: cue, lift, render) on formulas far

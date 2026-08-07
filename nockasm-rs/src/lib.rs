@@ -20,6 +20,8 @@
 //!
 //! jamfile bytes ─ cue ─▶ Noun ─ lift ─▶ Nasm ─ render ─▶ String
 //! Noun ─ jam ─▶ jamfile bytes
+//!
+//! shared Noun ─ lift_dag ─▶ NasmDag ─ render ─▶ DAG text
 //! ```
 //!
 //! [`expand`] is `lower ∘ parse`; [`nasm_from_jam`] is
@@ -37,6 +39,8 @@
 //!   `f` — the lift is deterministic and zero-heuristic, so
 //!   misclassifying data as code is impossible by construction.
 //! - **Serialization**: `cue(&jam(n)) == Ok(n)` for every noun `n`.
+//! - **DAG lift soundness**: `lift_dag(f)?.lower() == f`; parsing text
+//!   rendered from that DAG reproduces the same nodes and root.
 //!
 //! # Types
 //!
@@ -95,6 +99,7 @@
 #![warn(missing_docs)]
 
 mod ast;
+mod dag;
 mod error;
 mod jam;
 mod lex;
@@ -105,6 +110,7 @@ pub mod parse;
 mod render;
 
 pub use ast::{MatchArm, Name, Nasm, Op, Program, Schema};
+pub use dag::{lift_dag, parse_dag, DagError, DagId, DagNode, DagOp, NasmDag, NASM_DAG_VERSION};
 pub use error::{CueError, Error, InvalidName, LowerError, ParseError, ParseErrorKind, Pos};
 pub use jam::{cue, jam};
 pub use lift::{lift, nasm_from_jam};
