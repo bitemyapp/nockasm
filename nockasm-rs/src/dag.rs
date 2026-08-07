@@ -20,6 +20,12 @@ pub const NASM_DAG_VERSION: u32 = 1;
 pub struct DagId(pub(crate) u32);
 
 impl DagId {
+    /// Construct an ID from a zero-based node index when it fits the bundle's
+    /// 32-bit node table invariant.
+    pub fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index).ok().map(Self)
+    }
+
     /// The zero-based node index.
     pub fn index(self) -> usize {
         self.0 as usize
