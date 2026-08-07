@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::dag::{lower_nodes, LiftState, Mode};
+use crate::dag::{lower_nodes, lower_root_node, LiftState, Mode};
 use crate::{Atom, DagError, DagId, DagNode, DagOp, Noun};
 
 /// Version of the compact binary DAG bundle envelope.
@@ -95,8 +95,7 @@ impl NasmBundle {
     /// Rebuild one root by name.
     pub fn lower_root(&self, name: &str) -> Option<Noun> {
         let root = self.roots.iter().find(|root| root.name == name)?;
-        let values = lower_nodes(&self.nodes);
-        Some(values[root.id.index()].clone())
+        Some(lower_root_node(&self.nodes, root.id))
     }
 
     /// Encode the bundle into the compact, versioned binary envelope.

@@ -140,6 +140,54 @@ pub(crate) fn lower_nodes(nodes: &[DagNode]) -> Vec<Noun> {
     values
 }
 
+pub(crate) fn lower_root_node(nodes: &[DagNode], root: DagId) -> Noun {
+    let mut reachable = vec![false; nodes.len()];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if std::mem::replace(&mut reachable[id.index()], true) {
+            continue;
+        }
+        push_node_children(&nodes[id.index()], &mut stack);
+    }
+    let mut values = vec![Noun::from(0u64); nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        values[index] = match node {
+            DagNode::Atom(atom) => Noun::from(atom.clone()),
+            DagNode::Cell(head, tail) => {
+                Noun::cell(values[head.index()].clone(), values[tail.index()].clone())
+            }
+            DagNode::Nock(raw) => values[raw.index()].clone(),
+            DagNode::Op(op) => lower_op(op, &values),
+        };
+    }
+    values[root.index()].clone()
+}
+
+fn push_node_children(node: &DagNode, output: &mut Vec<DagId>) {
+    match node {
+        DagNode::Atom(_) | DagNode::Op(DagOp::Slot(_)) => {}
+        DagNode::Cell(a, b)
+        | DagNode::Op(DagOp::Eval(a, b))
+        | DagNode::Op(DagOp::Eq(a, b))
+        | DagNode::Op(DagOp::Comp(a, b))
+        | DagNode::Op(DagOp::Push(a, b))
+        | DagNode::Op(DagOp::Hint(a, b))
+        | DagNode::Op(DagOp::Scry(a, b)) => output.extend([*a, *b]),
+        DagNode::Nock(a)
+        | DagNode::Op(DagOp::Const(a))
+        | DagNode::Op(DagOp::Isa(a))
+        | DagNode::Op(DagOp::Inc(a))
+        | DagNode::Op(DagOp::Call(_, a)) => output.push(*a),
+        DagNode::Op(DagOp::If(a, b, c)) | DagNode::Op(DagOp::Hintd(a, b, c)) => {
+            output.extend([*a, *b, *c]);
+        }
+        DagNode::Op(DagOp::Edit(_, a, b)) => output.extend([*a, *b]),
+    }
+}
+
 /// A malformed DAG text or an input too large for 32-bit node IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
