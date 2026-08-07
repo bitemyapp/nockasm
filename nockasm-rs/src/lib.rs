@@ -99,6 +99,7 @@
 #![warn(missing_docs)]
 
 mod ast;
+mod bundle;
 mod dag;
 mod error;
 mod jam;
@@ -110,7 +111,12 @@ pub mod parse;
 mod render;
 
 pub use ast::{MatchArm, Name, Nasm, Op, Program, Schema};
-pub use dag::{lift_dag, parse_dag, DagError, DagId, DagNode, DagOp, NasmDag, NASM_DAG_VERSION};
+pub use bundle::{
+    lift_bundle, BundleError, DagInput, DagMode, DagRoot, NasmBundle, NASM_BUNDLE_VERSION,
+};
+pub use dag::{
+    lift_dag, lift_noun_dag, parse_dag, DagError, DagId, DagNode, DagOp, NasmDag, NASM_DAG_VERSION,
+};
 pub use error::{CueError, Error, InvalidName, LowerError, ParseError, ParseErrorKind, Pos};
 pub use jam::{cue, jam};
 pub use lift::{lift, nasm_from_jam};

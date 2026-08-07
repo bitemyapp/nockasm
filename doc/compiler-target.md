@@ -330,6 +330,12 @@ output), and `lift_dag(f).lower() == f` for every noun `f`. The DAG format is
 intended for machine artifacts, profiling, and debugging; tools that require
 portable human-authored `.nasm` should continue to use the ordinary tree IR.
 
+Compiled kernels, types, and cache records are noun-shaped roots, so the Rust
+API also provides `lift_noun_dag`. `lift_bundle` combines any number of named
+formula or noun roots into one shared table. The versioned binary bundle
+envelope is the authoritative compact encoding for persistent stores; the
+line-oriented DAG text remains the inspection encoding.
+
 ## 6. Mapping Jock environments to names
 
 Jock's lexical environment at any program point is a subject shape.

@@ -17,7 +17,7 @@ pub const NASM_DAG_VERSION: u32 = 1;
 
 /// A stable index into a [`NasmDag`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DagId(u32);
+pub struct DagId(pub(crate) u32);
 
 impl DagId {
     /// The zero-based node index.
@@ -76,8 +76,8 @@ pub enum DagNode {
 /// A DAG-preserving Nockasm AST.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NasmDag {
-    nodes: Vec<DagNode>,
-    root: DagId,
+    pub(crate) nodes: Vec<DagNode>,
+    pub(crate) root: DagId,
 }
 
 impl NasmDag {
@@ -94,18 +94,7 @@ impl NasmDag {
 
     /// Rebuild the represented noun while retaining DAG sharing.
     pub fn lower(&self) -> Noun {
-        let mut values: Vec<Noun> = Vec::with_capacity(self.nodes.len());
-        for node in &self.nodes {
-            let noun = match node {
-                DagNode::Atom(atom) => Noun::from(atom.clone()),
-                DagNode::Cell(head, tail) => {
-                    Noun::cell(values[head.index()].clone(), values[tail.index()].clone())
-                }
-                DagNode::Nock(raw) => values[raw.index()].clone(),
-                DagNode::Op(op) => lower_op(op, &values),
-            };
-            values.push(noun);
-        }
+        let values = lower_nodes(&self.nodes);
         values[self.root.index()].clone()
     }
 
@@ -127,6 +116,22 @@ impl NasmDag {
         }
         writeln!(out, "@root @{}", self.root.index())
     }
+}
+
+pub(crate) fn lower_nodes(nodes: &[DagNode]) -> Vec<Noun> {
+    let mut values: Vec<Noun> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let noun = match node {
+            DagNode::Atom(atom) => Noun::from(atom.clone()),
+            DagNode::Cell(head, tail) => {
+                Noun::cell(values[head.index()].clone(), values[tail.index()].clone())
+            }
+            DagNode::Nock(raw) => values[raw.index()].clone(),
+            DagNode::Op(op) => lower_op(op, &values),
+        };
+        values.push(noun);
+    }
+    values
 }
 
 /// A malformed DAG text or an input too large for 32-bit node IDs.
@@ -199,7 +204,7 @@ fn lower_op(op: &DagOp, values: &[Noun]) -> Noun {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
+pub(crate) enum Mode {
     Formula,
     Noun,
 }
@@ -277,90 +282,132 @@ fn schedule_nock<'a>(tasks: &mut Vec<Task<'a>>, noun: &'a Noun) {
     );
 }
 
+pub(crate) struct LiftState {
+    pub(crate) nodes: Vec<DagNode>,
+    formula_memo: HashMap<Noun, DagId>,
+    noun_memo: HashMap<Noun, DagId>,
+}
+
+impl LiftState {
+    pub(crate) fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            formula_memo: HashMap::new(),
+            noun_memo: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn lift(&mut self, root: &Noun, root_mode: Mode) -> Result<DagId, DagError> {
+        let mut tasks = vec![Task::Visit(root, root_mode)];
+        let mut values: Vec<DagId> = Vec::new();
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(noun, mode) => {
+                    if let Some(id) =
+                        memo(mode, &mut self.formula_memo, &mut self.noun_memo).get(noun)
+                    {
+                        values.push(*id);
+                        continue;
+                    }
+                    match mode {
+                        Mode::Noun => match noun.view() {
+                            NounRef::Atom(atom) => {
+                                let id = push_node(&mut self.nodes, DagNode::Atom(atom.clone()))?;
+                                self.noun_memo.insert(noun.clone(), id);
+                                values.push(id);
+                            }
+                            NounRef::Cell(head, tail) => schedule(
+                                &mut tasks,
+                                noun,
+                                mode,
+                                Build::Cell,
+                                &[(head, mode), (tail, mode)],
+                            ),
+                        },
+                        Mode::Formula => visit_formula(
+                            noun,
+                            &mut tasks,
+                            &mut self.nodes,
+                            &mut self.formula_memo,
+                            &mut values,
+                        )?,
+                    }
+                }
+                Task::Build {
+                    noun,
+                    mode,
+                    kind,
+                    children,
+                } => {
+                    let split = values.len() - children;
+                    let ids = values.split_off(split);
+                    let node = match (kind, ids.as_slice()) {
+                        (Build::Cell, [head, tail]) => DagNode::Cell(*head, *tail),
+                        (Build::Nock, [raw]) => DagNode::Nock(*raw),
+                        (Build::Const, [value]) => DagNode::Op(DagOp::Const(*value)),
+                        (Build::Eval, [subject, formula]) => {
+                            DagNode::Op(DagOp::Eval(*subject, *formula))
+                        }
+                        (Build::Isa, [formula]) => DagNode::Op(DagOp::Isa(*formula)),
+                        (Build::Inc, [formula]) => DagNode::Op(DagOp::Inc(*formula)),
+                        (Build::Eq, [left, right]) => DagNode::Op(DagOp::Eq(*left, *right)),
+                        (Build::If, [condition, then_, else_]) => {
+                            DagNode::Op(DagOp::If(*condition, *then_, *else_))
+                        }
+                        (Build::Comp, [first, second]) => DagNode::Op(DagOp::Comp(*first, *second)),
+                        (Build::Push, [value, body]) => DagNode::Op(DagOp::Push(*value, *body)),
+                        (Build::Call(axis), [formula]) => DagNode::Op(DagOp::Call(axis, *formula)),
+                        (Build::Edit(axis), [value, formula]) => {
+                            DagNode::Op(DagOp::Edit(axis, *value, *formula))
+                        }
+                        (Build::Hint, [tag, formula]) => DagNode::Op(DagOp::Hint(*tag, *formula)),
+                        (Build::Hintd, [tag, clue, formula]) => {
+                            DagNode::Op(DagOp::Hintd(*tag, *clue, *formula))
+                        }
+                        (Build::Scry, [reference, path]) => {
+                            DagNode::Op(DagOp::Scry(*reference, *path))
+                        }
+                        _ => unreachable!("build arity is fixed by scheduling"),
+                    };
+                    let id = push_node(&mut self.nodes, node)?;
+                    memo(mode, &mut self.formula_memo, &mut self.noun_memo)
+                        .insert(noun.clone(), id);
+                    values.push(id);
+                }
+            }
+        }
+
+        debug_assert_eq!(values.len(), 1);
+        Ok(values.pop().expect("root produces one DAG node"))
+    }
+}
+
 /// Lift a noun as a formula while preserving its DAG sharing.
 ///
 /// Formula-position and noun-position reads have separate memo tables: the
 /// same noun can correctly become an opcode in one position and raw data in
 /// another. Soundness is exact: `lift_dag(n)?.lower() == n`.
 pub fn lift_dag(root: &Noun) -> Result<NasmDag, DagError> {
-    let mut nodes = Vec::new();
-    let mut formula_memo: HashMap<Noun, DagId> = HashMap::new();
-    let mut noun_memo: HashMap<Noun, DagId> = HashMap::new();
-    let mut tasks = vec![Task::Visit(root, Mode::Formula)];
-    let mut values: Vec<DagId> = Vec::new();
-
-    while let Some(task) = tasks.pop() {
-        match task {
-            Task::Visit(noun, mode) => {
-                if let Some(id) = memo(mode, &mut formula_memo, &mut noun_memo).get(noun) {
-                    values.push(*id);
-                    continue;
-                }
-                match mode {
-                    Mode::Noun => match noun.view() {
-                        NounRef::Atom(atom) => {
-                            let id = push_node(&mut nodes, DagNode::Atom(atom.clone()))?;
-                            noun_memo.insert(noun.clone(), id);
-                            values.push(id);
-                        }
-                        NounRef::Cell(head, tail) => schedule(
-                            &mut tasks,
-                            noun,
-                            mode,
-                            Build::Cell,
-                            &[(head, mode), (tail, mode)],
-                        ),
-                    },
-                    Mode::Formula => {
-                        visit_formula(noun, &mut tasks, &mut nodes, &mut formula_memo, &mut values)?
-                    }
-                }
-            }
-            Task::Build {
-                noun,
-                mode,
-                kind,
-                children,
-            } => {
-                let split = values.len() - children;
-                let ids = values.split_off(split);
-                let node = match (kind, ids.as_slice()) {
-                    (Build::Cell, [head, tail]) => DagNode::Cell(*head, *tail),
-                    (Build::Nock, [raw]) => DagNode::Nock(*raw),
-                    (Build::Const, [value]) => DagNode::Op(DagOp::Const(*value)),
-                    (Build::Eval, [subject, formula]) => {
-                        DagNode::Op(DagOp::Eval(*subject, *formula))
-                    }
-                    (Build::Isa, [formula]) => DagNode::Op(DagOp::Isa(*formula)),
-                    (Build::Inc, [formula]) => DagNode::Op(DagOp::Inc(*formula)),
-                    (Build::Eq, [left, right]) => DagNode::Op(DagOp::Eq(*left, *right)),
-                    (Build::If, [condition, then_, else_]) => {
-                        DagNode::Op(DagOp::If(*condition, *then_, *else_))
-                    }
-                    (Build::Comp, [first, second]) => DagNode::Op(DagOp::Comp(*first, *second)),
-                    (Build::Push, [value, body]) => DagNode::Op(DagOp::Push(*value, *body)),
-                    (Build::Call(axis), [formula]) => DagNode::Op(DagOp::Call(axis, *formula)),
-                    (Build::Edit(axis), [value, formula]) => {
-                        DagNode::Op(DagOp::Edit(axis, *value, *formula))
-                    }
-                    (Build::Hint, [tag, formula]) => DagNode::Op(DagOp::Hint(*tag, *formula)),
-                    (Build::Hintd, [tag, clue, formula]) => {
-                        DagNode::Op(DagOp::Hintd(*tag, *clue, *formula))
-                    }
-                    (Build::Scry, [reference, path]) => DagNode::Op(DagOp::Scry(*reference, *path)),
-                    _ => unreachable!("build arity is fixed by scheduling"),
-                };
-                let id = push_node(&mut nodes, node)?;
-                memo(mode, &mut formula_memo, &mut noun_memo).insert(noun.clone(), id);
-                values.push(id);
-            }
-        }
-    }
-
-    debug_assert_eq!(values.len(), 1);
+    let mut state = LiftState::new();
+    let root = state.lift(root, Mode::Formula)?;
     Ok(NasmDag {
-        nodes,
-        root: values.pop().expect("root produces one DAG node"),
+        nodes: state.nodes,
+        root,
+    })
+}
+
+/// Lift an arbitrary noun structurally while preserving its DAG sharing.
+///
+/// Unlike [`lift_dag`], this does not assert that the root is a formula and
+/// never interprets noun cells as named opcodes. It is the correct entry point
+/// for compiled kernels, types, cache records, and other noun-shaped data.
+pub fn lift_noun_dag(root: &Noun) -> Result<NasmDag, DagError> {
+    let mut state = LiftState::new();
+    let root = state.lift(root, Mode::Noun)?;
+    Ok(NasmDag {
+        nodes: state.nodes,
+        root,
     })
 }
 

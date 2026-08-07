@@ -71,6 +71,13 @@ unique node once. Both `lift_dag` and `NasmDag::render` are O(unique nodes +
 output). The text begins with `:nockasm-dag 1`; `parse_dag` validates that
 all references point backward, so malformed or cyclic graphs are rejected.
 
+Compiled artifacts often have noun-shaped roots rather than formula roots.
+`lift_noun_dag` preserves those structurally, while `lift_bundle` accepts
+multiple named formula/noun roots and shares one node table across them. A
+bundle's `to_bytes` / `from_bytes` methods provide a compact, versioned binary
+envelope for caches and artifact stores without paying the size or parse cost
+of line-oriented text.
+
 ## Types
 
 The IR (`Nasm`, `Op`, `Schema`, `Program`) refines the reference
