@@ -547,8 +547,21 @@ impl From<&Noun> for Noun {
 }
 
 impl PartialEq for Noun {
+    /// Structural equality, with two shortcuts and one memo: shared
+    /// cells compare by pointer, cells with different hashes are
+    /// unequal at once, and a pair of cells already compared is not
+    /// walked again. The memo is what keeps a comparison linear in the
+    /// DAG rather than the tree: a noun such as a kernel core shares
+    /// its subtrees enormously (every gate carries the kernel as its
+    /// context), and two separately built copies of one such noun
+    /// would otherwise be walked out to their tree size, which is
+    /// exponential. It is allocated only once a comparison has gone
+    /// past a small number of nodes, so equality of small nouns stays
+    /// allocation-free.
     fn eq(&self, other: &Self) -> bool {
         let mut stack: Vec<(&Noun, &Noun)> = vec![(self, other)];
+        let mut seen: Option<std::collections::HashSet<(usize, usize)>> = None;
+        let mut steps: usize = 0;
         while let Some((a, b)) = stack.pop() {
             match (&a.0, &b.0) {
                 (NounRepr::Atom(x), NounRepr::Atom(y)) => {
@@ -562,6 +575,14 @@ impl PartialEq for Noun {
                     }
                     if x.hash != y.hash {
                         return false;
+                    }
+                    steps += 1;
+                    if steps > 64 {
+                        let key = (P::as_ptr(x) as usize, P::as_ptr(y) as usize);
+                        let memo = seen.get_or_insert_with(std::collections::HashSet::new);
+                        if !memo.insert(key) {
+                            continue;
+                        }
                     }
                     stack.push((&x.tail, &y.tail));
                     stack.push((&x.head, &y.head));
