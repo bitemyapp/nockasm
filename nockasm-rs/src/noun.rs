@@ -19,7 +19,7 @@
 
 use std::cmp::Ordering;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::mem;
 use std::ops::Deref;
 
@@ -664,7 +664,7 @@ impl PartialEq for Noun {
     /// allocation-free.
     fn eq(&self, other: &Self) -> bool {
         let mut stack: Vec<(&Noun, &Noun)> = vec![(self, other)];
-        let mut seen: Option<std::collections::HashSet<(usize, usize)>> = None;
+        let mut seen: Option<Seen> = None;
         let mut steps: usize = 0;
         while let Some((a, b)) = stack.pop() {
             match (&a.0, &b.0) {
@@ -681,9 +681,9 @@ impl PartialEq for Noun {
                         return false;
                     }
                     steps += 1;
-                    if steps > 64 {
+                    if steps > 256 {
                         let key = (P::as_ptr(x) as usize, P::as_ptr(y) as usize);
-                        let memo = seen.get_or_insert_with(std::collections::HashSet::new);
+                        let memo = seen.get_or_insert_with(Seen::default);
                         if !memo.insert(key) {
                             continue;
                         }
@@ -699,6 +699,33 @@ impl PartialEq for Noun {
 }
 
 impl Eq for Noun {}
+
+/// The equality memo's set of visited pointer pairs. Its hasher mixes
+/// the two addresses directly (an interpreter compares nouns on every
+/// `=` and every jet lookup, and the default SipHash was the cost of
+/// the comparison).
+type Seen = std::collections::HashSet<(usize, usize), BuildHasherDefault<PairHasher>>;
+
+#[derive(Default)]
+struct PairHasher(u64);
+
+impl Hasher for PairHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(23) ^ x).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.write_u64(x as u64);
+    }
+    fn finish(&self) -> u64 {
+        let z = self.0;
+        (z ^ (z >> 31)).wrapping_mul(0x94d0_49bb_1331_11eb) ^ (z >> 29)
+    }
+}
 
 impl Hash for Noun {
     fn hash<H: Hasher>(&self, state: &mut H) {
