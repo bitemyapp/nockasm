@@ -203,6 +203,12 @@ impl Atom {
 
     /// A deterministic 64-bit structural hash (FNV-1a over the bytes).
     pub(crate) fn hash64(&self) -> u64 {
+        // a small atom is one mix (an interpreter hashes one per cell
+        // it builds); a big one is FNV over its bytes. The two ranges
+        // are disjoint, so equal atoms hash alike.
+        if let Repr::Small(v) = self.0 {
+            return splitmix(v ^ 0xa70a_0000_0000_5e9d);
+        }
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for &b in self.le_bytes().iter() {
             h ^= u64::from(b);
