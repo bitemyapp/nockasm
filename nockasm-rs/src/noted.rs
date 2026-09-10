@@ -1,57 +1,78 @@
-//! `noted`: the annotated instantiation of the IR vocabulary.
+//! `noted`: the annotated instantiation of the IR vocabulary, as the
+//! Hoon reference spells it.
 //!
 //! [`Nasm`] is the IR the rest of this crate consumes, and it is a
-//! closed tree: every child is another `Nasm`. A compiler emitting
-//! nockasm usually wants to carry something alongside each node — a
-//! source position for diagnostics, a provenance tag — and the
-//! tempting move is to fork the vocabulary: a second enum with the same
-//! variants plus an annotation, drifting from the first every time a
-//! variant is added.
+//! closed, typed tree: every child is another `Nasm`, and an opcode's
+//! axis argument is a bare [`Atom`]. A compiler emitting nockasm
+//! usually wants to carry something alongside each node — a source
+//! position for diagnostics, a provenance tag — and the tempting move
+//! is to fork the vocabulary: a second enum with the same variants
+//! plus an annotation, drifting from the first every time a variant is
+//! added.
 //!
 //! The Hoon reference (`desk/sur/nockasm.hoon`) avoids the fork by
 //! parameterizing the vocabulary over its own recursion, so that an
 //! annotated instantiation is a first-class citizen rather than a copy:
 //!
 //! ```text
-//! ++  nasm-of  |$  [self]  $%  [%atom p=@]  ...  [%let p=@t q=self r=self]  ...  ==
+//! ++  nasm-of  |$  [self]  $%  [%atom p=@]  [%axis p=@t]  [%cell p=(list self)]
+//!                              [%op p=@t q=(list self)]  [%let p=@t q=self r=self]
+//!                              [%match p=self q=(list [p=self q=self]) r=self]
+//!                              [%nock p=*]  ==
 //! +$  nasm   $~([%atom 0] (nasm-of nasm))                        ::  the plain knot
 //! +$  noted  $~([*note [%atom 0]] [=note node=(nasm-of noted)])  ::  an annotated one
 //! ```
 //!
-//! This module is that pattern in Rust. [`NasmOf<N>`] (with [`OpOf<N>`]
-//! and [`MatchArmOf<N>`]) is the vocabulary generic over the child
-//! type, mirroring [`Nasm`], [`Op`], and [`MatchArm`] variant for
-//! variant; [`Noted<A>`] ties the knot through a wrapper that carries a
-//! note of type `A` on every node. The intended consumer is a compiler
-//! that emits positioned IR — the Jock backend instantiates the Hoon
-//! builder with `[pos=(unit hair) node=(nasm-of nasm)]`, which here is
-//! `Noted<Option<Pos>>`.
+//! This module is that pattern in Rust, and it keeps the reference
+//! vocabulary's one property the typed [`Nasm`] gives up: the opcode is
+//! a name and its arguments are a list of nodes. [`NasmOf<N>`] is the
+//! vocabulary generic over the child type, case for case with
+//! `+nasm-of`; [`Noted<A>`] ties the knot through a wrapper that
+//! carries a note of type `A` on every node. An emitter that
+//! instantiates the Hoon builder with `[pos=(unit hair) node=(nasm-of
+//! nasm)]` holds `Noted<Option<Pos>>` here — and because the axis of a
+//! `%slot`, `%call`, or `%edit` is a node like any other, it carries a
+//! position too, which is what a positioned emitter's conformance
+//! vectors compare.
 //!
 //! # The strip contract
 //!
 //! [`Noted::strip`] is the projection onto the bare IR: drop every
-//! note, recurse. [`Noted::from_nasm`] is a section of it — every node
-//! gets the same note — so `Noted::from_nasm(&n, a).strip() == n` for
-//! every `n`. The meaning of an annotated value is the meaning of its
-//! projection, `lower(schema, &noted.strip())`; the conformance law a
-//! positioned emitter is held to is `(expand ours) == (reference
-//! expansion of (strip ours))`. [`lower`] and [`render`] here are
-//! exactly the bare pipeline composed with the projection, so a
-//! compiler holding annotated IR never has to spell it out.
+//! note, check the vocabulary, recurse. It is where the reference
+//! implementations' lower-time refusals live — an unknown opcode, a
+//! wrong arity, a non-atom axis argument, a unary raw cell — since
+//! [`Nasm`] cannot represent those and the reference vocabulary can;
+//! they come back as a [`StripError`] carrying the reference crash tag.
+//! [`Noted::dress`] is a section of it — every node gets the same note,
+//! axis atoms become `%atom` nodes — so `Noted::dress(&n, a).strip() ==
+//! Ok(n)` for every `n`. The meaning of an annotated value is the
+//! meaning of its projection, `lower(schema, &noted.strip()?)`; the
+//! conformance law a positioned emitter is held to is `(expand ours)
+//! == (reference expansion of (strip ours))`. [`lower`] and [`render`]
+//! here are exactly the bare pipeline composed with the projection, so
+//! a compiler holding annotated IR never has to spell it out.
 //!
 //! ```
-//! use nockasm::noted::{self, Noted};
-//! use nockasm::{expand, parse};
+//! use nockasm::noted::{self, NasmOf, Noted};
+//! use nockasm::{expand, parse, Atom};
 //!
-//! let src = ":subject .x  #let .d = (%inc .x) in .d";
+//! let src = ":subject .x  #let .d = (%inc .x) in (%slot 2)";
 //! let program = parse(src).unwrap();
-//! // A compiler builds `Noted` directly, positions and all; here every
-//! // node gets the same note.
-//! let positioned: Noted<Option<(u32, u32)>> =
-//!     Noted::from_nasm(&program.body, Some((1, 1)));
-//! assert_eq!(positioned.strip(), program.body);
+//! // A compiler builds `Noted` directly, positions and all: here the
+//! // let at line 1, its value and the axis atom of the slot elsewhere.
+//! let at = |line: u32, col: u32, node| Noted::new(Some((line, col)), node);
+//! let ours = at(
+//!     1,
+//!     14,
+//!     NasmOf::Let(
+//!         "d".into(),
+//!         Box::new(at(1, 23, NasmOf::Op("inc".into(), vec![at(1, 28, NasmOf::Axis("x".into()))]))),
+//!         Box::new(at(1, 35, NasmOf::Op("slot".into(), vec![at(1, 41, NasmOf::Atom(Atom::from(2u64)))]))),
+//!     ),
+//! );
+//! assert_eq!(ours.strip().unwrap(), program.body);
 //! assert_eq!(
-//!     noted::lower(program.schema.as_ref(), &positioned).unwrap(),
+//!     noted::lower(program.schema.as_ref(), &ours).unwrap(),
 //!     expand(src).unwrap(),
 //! );
 //! ```
@@ -59,16 +80,16 @@
 //! # Drift is a compile error
 //!
 //! `Nasm` stays a separate concrete type — it is the cross-implementation
-//! contract and what every other stage consumes — so the bare and generic
+//! contract and what every other stage consumes — so the two
 //! vocabularies are kept in step by hand, and this module makes a slip
-//! fail to compile rather than fail at runtime. The bridge between them
-//! is exactly two functions: [`unroll`] (`&Nasm -> NasmOf<&Nasm>`) is an
-//! exhaustive match over `Nasm` and `Op`, and [`roll`]
-//! (`NasmOf<Nasm> -> Nasm`) is an exhaustive match over `NasmOf` and
-//! `OpOf`. Neither has a wildcard arm, so a variant added to either side
-//! without its twin breaks one of them — the same discipline the Hoon
-//! `$opco` term set imposes on its expander. Everything else in the
-//! module ([`strip`](Noted::strip), [`from_nasm`](Noted::from_nasm),
+//! fail to compile rather than fail at runtime. The bridge from the
+//! typed side is one private function, `unroll` (`&Nasm -> NasmOf<_>`),
+//! an exhaustive match over `Nasm` and `Op` with no wildcard arm, so a
+//! variant added to `Nasm` without its untyped reading breaks it; the
+//! bridge back is [`roll`] (`NasmOf<Nasm> -> Result<Nasm, StripError>`),
+//! exhaustive over `NasmOf` and over the opcode table, and the unit
+//! tests hold the table to every `Op` variant. Everything else in the
+//! module ([`strip`](Noted::strip), [`dress`](Noted::dress),
 //! [`map_note`](Noted::map_note), the teardown) is built from those two
 //! and from the vocabulary's own [`map`](NasmOf::map), so it inherits a
 //! new variant automatically.
@@ -76,11 +97,13 @@
 //! # Depth
 //!
 //! `Noted` is a boxed tree like `Nasm` and keeps the same guarantee:
-//! teardown, `strip`, `from_nasm`, and `map_note` all run on explicit
+//! teardown, `strip`, `dress`, and `map_note` all run on explicit
 //! stacks, so annotated IR of any depth converts and drops without
 //! touching the call stack. As with `Nasm`, the *derived* `Clone`,
 //! `PartialEq`, and `Debug` recurse; deep-cloning or deep-comparing
 //! annotated IR is the caller's lookout.
+
+use std::fmt;
 
 use crate::ast::{MatchArm, Name, Nasm, Op, Schema};
 use crate::error::LowerError;
@@ -90,478 +113,379 @@ use crate::noun::{Atom, Noun};
 // The vocabulary, generic over its recursion
 // ----------------------------------------------------------------------
 
-/// One layer of the IR vocabulary with every child position replaced
-/// by `N`: [`Nasm`] variant for variant, minus the recursion.
+/// `+nasm-of`: one layer of the IR vocabulary with every child position
+/// replaced by `N`, case for case with the Hoon builder.
 ///
-/// `NasmOf<&Nasm>` is a borrowed view of one plain node (see
-/// [`unroll`]), `NasmOf<Nasm>` an owned one (see [`roll`]), and
-/// `NasmOf<Box<Noted<A>>>` the node of an annotated tree. The
-/// per-variant semantics are those of the [`Nasm`] variant of the same
-/// name; only the child type differs.
+/// `NasmOf<Noted<A>>` is the node of an annotated tree; `NasmOf<()>` is
+/// a node's shape with its children forgotten. The opcode is a name and
+/// its arguments a list: the vocabulary check ([`roll`]) is where the
+/// name and the arity are held to the [`Op`] table, and an axis
+/// argument is an `Atom` *node*, so it can carry a note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NasmOf<N> {
-    /// An atom literal. See [`Nasm::Atom`].
+    /// `[%atom p=@]` — an atom literal. See [`Nasm::Atom`].
     Atom(Atom),
-    /// `.name` — a reference into the subject schema. See
-    /// [`Nasm::Axis`].
-    Axis(Name),
-    /// `[a b c ...]` — a raw structural cell of two-or-more elements.
-    /// See [`Nasm::Cell`].
-    Cell {
-        /// First element.
-        first: N,
-        /// Second element.
-        second: N,
-        /// Any further elements.
-        rest: Vec<N>,
-    },
-    /// `(%opcode ...)` — a named opcode application. See [`Nasm::Op`].
-    Op(OpOf<N>),
-    /// `#let name = value in body`. See [`Nasm::Let`].
-    Let {
-        /// The bound name (axis 2 in the body).
-        name: Name,
-        /// The pushed value — a formula position.
-        value: N,
-        /// The body — a formula position.
-        body: N,
-    },
-    /// `#match scrutinee { pat => body ... _ => default }`. See
-    /// [`Nasm::Match`].
-    Match {
-        /// The scrutinee — a formula position.
-        scrutinee: N,
-        /// The literal-pattern arms, in source order.
-        arms: Vec<MatchArmOf<N>>,
-        /// The required `_ =>` default — a formula position.
-        default: N,
-    },
-    /// `(%nock F)` — an already-formed formula embedded as an opaque
-    /// noun. See [`Nasm::Nock`].
+    /// `[%axis p=@t]` — `.name`, a reference into the subject schema.
+    /// See [`Nasm::Axis`]; the name is checked nowhere here (an
+    /// emitter's names never pass through the text grammar).
+    Axis(String),
+    /// `[%cell p=(list self)]` — a raw structural cell; two or more
+    /// elements once stripped. See [`Nasm::Cell`].
+    Cell(Vec<N>),
+    /// `[%op p=@t q=(list self)]` — `(%opcode args...)`. See
+    /// [`Nasm::Op`]; the name and the arity are checked by [`roll`].
+    Op(String, Vec<N>),
+    /// `[%let p=@t q=self r=self]` — `#let name = value in body`. See
+    /// [`Nasm::Let`].
+    Let(String, Box<N>, Box<N>),
+    /// `[%match p=self q=(list [p q]) r=self]` — `#match scrutinee {
+    /// pattern => body ... _ => default }`. See [`Nasm::Match`].
+    Match(Box<N>, Vec<(N, N)>, Box<N>),
+    /// `[%nock p=*]` — an opaque embedded formula. See [`Nasm::Nock`].
     Nock(Noun),
 }
 
-/// A well-formed named-opcode application with child positions of type
-/// `N`: [`Op`] variant for variant. Argument kinds (formula, noun, axis)
-/// are those of the [`Op`] variant of the same name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OpOf<N> {
-    /// `(%slot N)` → `[0 N]`. See [`Op::Slot`].
-    Slot(Atom),
-    /// `(%self)` → `[0 1]`. See [`Op::Self_`].
-    Self_,
-    /// `(%battery)` → `[0 2]`. See [`Op::Battery`].
-    Battery,
-    /// `(%payload)` → `[0 3]`. See [`Op::Payload`].
-    Payload,
-    /// `(%sample)` → `[0 6]`. See [`Op::Sample`].
-    Sample,
-    /// `(%context)` → `[0 7]`. See [`Op::Context`].
-    Context,
-    /// `(%crash)` → `[0 0]`. See [`Op::Crash`].
-    Crash,
-    /// `(%const X)` → `[1 X]`. See [`Op::Const`].
-    Const(N),
-    /// `(%arm X)` → `[1 X]`. See [`Op::Arm`].
-    Arm(N),
-    /// `(%eval S F)` → `[2 S F]`. See [`Op::Eval`].
-    Eval(N, N),
-    /// `(%isa F)` → `[3 F]`. See [`Op::Isa`].
-    Isa(N),
-    /// `(%inc F)` → `[4 F]`. See [`Op::Inc`].
-    Inc(N),
-    /// `(%eq F G)` → `[5 F G]`. See [`Op::Eq`].
-    Eq(N, N),
-    /// `(%if C T E)` → `[6 C T E]`. See [`Op::If`].
-    If(N, N, N),
-    /// `(%comp F G)` → `[7 F G]`. See [`Op::Comp`].
-    Comp(N, N),
-    /// `(%push F G)` → `[8 F G]`. See [`Op::Push`].
-    Push(N, N),
-    /// `(%call N F)` → `[9 N F]`. See [`Op::Call`].
-    Call(Atom, N),
-    /// `(%edit N V F)` → `[10 [N V] F]`. See [`Op::Edit`].
-    Edit(Atom, N, N),
-    /// `(%hint T F)` → `[11 T F]`. See [`Op::Hint`].
-    Hint(N, N),
-    /// `(%hintd T C F)` → `[11 [T C] F]`. See [`Op::Hintd`].
-    Hintd(N, N, N),
-    /// `(%scry R P)` → `[12 R P]`. See [`Op::Scry`].
-    Scry(N, N),
-}
-
-/// One `#match` arm with positions of type `N`: [`MatchArm`] minus the
-/// recursion.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MatchArmOf<N> {
-    /// The literal pattern — a noun position.
-    pub pattern: N,
-    /// The arm body — a formula position.
-    pub body: N,
-}
-
 impl<N> NasmOf<N> {
-    /// Replace every child, in source order, keeping the node's own
-    /// data (atoms, names, the `%nock` payload).
-    ///
-    /// This is the vocabulary's functorial map, and the one place the
-    /// child order is defined: first, second, then the rest of a cell;
-    /// an opcode's arguments left to right; a `#let`'s value then body;
-    /// a `#match`'s scrutinee, then each arm's pattern and body, then
-    /// the default. Every traversal in this module enumerates children
-    /// through it. Exhaustive over `NasmOf`, deliberately: see the
-    /// module docs.
+    /// The case name: `atom`, `axis`, `cell`, `op`, `let`, `match`, or
+    /// `nock`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            NasmOf::Atom(_) => "atom",
+            NasmOf::Axis(_) => "axis",
+            NasmOf::Cell(_) => "cell",
+            NasmOf::Op(..) => "op",
+            NasmOf::Let(..) => "let",
+            NasmOf::Match(..) => "match",
+            NasmOf::Nock(_) => "nock",
+        }
+    }
+
+    /// Whether this layer has no children.
+    pub fn is_leaf(&self) -> bool {
+        match self {
+            NasmOf::Atom(_) | NasmOf::Axis(_) | NasmOf::Nock(_) => true,
+            NasmOf::Cell(items) => items.is_empty(),
+            NasmOf::Op(_, args) => args.is_empty(),
+            NasmOf::Let(..) | NasmOf::Match(..) => false,
+        }
+    }
+
+    /// Rewrite every child, keeping the layer. Children are visited in
+    /// their source order: a cell's elements, an op's arguments, a
+    /// let's value then body, a match's scrutinee, then each arm's
+    /// pattern and body, then the default. Every traversal in this
+    /// module enumerates children through `map`, so no two of them can
+    /// disagree about the order.
     pub fn map<M>(self, mut f: impl FnMut(N) -> M) -> NasmOf<M> {
         match self {
             NasmOf::Atom(a) => NasmOf::Atom(a),
             NasmOf::Axis(name) => NasmOf::Axis(name),
-            NasmOf::Cell {
-                first,
-                second,
-                rest,
-            } => {
-                let first = f(first);
-                let second = f(second);
-                let rest = rest.into_iter().map(&mut f).collect();
-                NasmOf::Cell {
-                    first,
-                    second,
-                    rest,
-                }
+            NasmOf::Cell(items) => NasmOf::Cell(items.into_iter().map(f).collect()),
+            NasmOf::Op(name, args) => NasmOf::Op(name, args.into_iter().map(f).collect()),
+            NasmOf::Let(name, value, body) => {
+                let value = Box::new(f(*value));
+                let body = Box::new(f(*body));
+                NasmOf::Let(name, value, body)
             }
-            NasmOf::Op(op) => NasmOf::Op(op.map(f)),
-            NasmOf::Let { name, value, body } => {
-                let value = f(value);
-                let body = f(body);
-                NasmOf::Let { name, value, body }
-            }
-            NasmOf::Match {
-                scrutinee,
-                arms,
-                default,
-            } => {
-                let scrutinee = f(scrutinee);
-                let arms = arms.into_iter().map(|arm| arm.map(&mut f)).collect();
-                let default = f(default);
-                NasmOf::Match {
-                    scrutinee,
-                    arms,
-                    default,
-                }
+            NasmOf::Match(scrutinee, arms, default) => {
+                let scrutinee = Box::new(f(*scrutinee));
+                let arms = arms
+                    .into_iter()
+                    .map(|(pattern, body)| {
+                        let pattern = f(pattern);
+                        let body = f(body);
+                        (pattern, body)
+                    })
+                    .collect();
+                let default = Box::new(f(*default));
+                NasmOf::Match(scrutinee, arms, default)
             }
             NasmOf::Nock(noun) => NasmOf::Nock(noun),
         }
     }
 
-    /// Borrow every child, cloning the node's own data (atoms and
-    /// nouns are refcounted; a name is one string clone).
-    /// `node.as_ref().map(f)` is the by-reference map.
+    /// The same layer with the children borrowed.
     pub fn as_ref(&self) -> NasmOf<&N> {
         match self {
             NasmOf::Atom(a) => NasmOf::Atom(a.clone()),
             NasmOf::Axis(name) => NasmOf::Axis(name.clone()),
-            NasmOf::Cell {
-                first,
-                second,
-                rest,
-            } => NasmOf::Cell {
-                first,
-                second,
-                rest: rest.iter().collect(),
-            },
-            NasmOf::Op(op) => NasmOf::Op(op.as_ref()),
-            NasmOf::Let { name, value, body } => NasmOf::Let {
-                name: name.clone(),
-                value,
-                body,
-            },
-            NasmOf::Match {
-                scrutinee,
-                arms,
-                default,
-            } => NasmOf::Match {
-                scrutinee,
-                arms: arms.iter().map(MatchArmOf::as_ref).collect(),
-                default,
-            },
+            NasmOf::Cell(items) => NasmOf::Cell(items.iter().collect()),
+            NasmOf::Op(name, args) => NasmOf::Op(name.clone(), args.iter().collect()),
+            NasmOf::Let(name, value, body) => {
+                NasmOf::Let(name.clone(), Box::new(value), Box::new(body))
+            }
+            NasmOf::Match(scrutinee, arms, default) => NasmOf::Match(
+                Box::new(scrutinee),
+                arms.iter().map(|(p, b)| (p, b)).collect(),
+                Box::new(default),
+            ),
             NasmOf::Nock(noun) => NasmOf::Nock(noun.clone()),
         }
     }
 
-    /// No child positions at all. (A zero-argument opcode is not a
-    /// leaf by this definition, matching `Nasm`; it merely has nothing
-    /// to push.) `Nock` holds a `Noun`, whose own drop is iterative.
-    fn is_leaf(&self) -> bool {
-        matches!(self, NasmOf::Atom(_) | NasmOf::Axis(_) | NasmOf::Nock(_))
-    }
-}
-
-impl<N> OpOf<N> {
-    /// The opcode's source name, without the `%`; agrees with
-    /// [`Op::name`].
-    pub fn name(&self) -> &'static str {
-        match self {
-            OpOf::Slot(_) => "slot",
-            OpOf::Self_ => "self",
-            OpOf::Battery => "battery",
-            OpOf::Payload => "payload",
-            OpOf::Sample => "sample",
-            OpOf::Context => "context",
-            OpOf::Crash => "crash",
-            OpOf::Const(_) => "const",
-            OpOf::Arm(_) => "arm",
-            OpOf::Eval(..) => "eval",
-            OpOf::Isa(_) => "isa",
-            OpOf::Inc(_) => "inc",
-            OpOf::Eq(..) => "eq",
-            OpOf::If(..) => "if",
-            OpOf::Comp(..) => "comp",
-            OpOf::Push(..) => "push",
-            OpOf::Call(..) => "call",
-            OpOf::Edit(..) => "edit",
-            OpOf::Hint(..) => "hint",
-            OpOf::Hintd(..) => "hintd",
-            OpOf::Scry(..) => "scry",
-        }
-    }
-
-    /// Replace every argument, left to right, keeping axis atoms.
-    /// Exhaustive over `OpOf`, deliberately: see the module docs.
-    pub fn map<M>(self, mut f: impl FnMut(N) -> M) -> OpOf<M> {
-        match self {
-            OpOf::Slot(ax) => OpOf::Slot(ax),
-            OpOf::Self_ => OpOf::Self_,
-            OpOf::Battery => OpOf::Battery,
-            OpOf::Payload => OpOf::Payload,
-            OpOf::Sample => OpOf::Sample,
-            OpOf::Context => OpOf::Context,
-            OpOf::Crash => OpOf::Crash,
-            OpOf::Const(x) => OpOf::Const(f(x)),
-            OpOf::Arm(x) => OpOf::Arm(f(x)),
-            OpOf::Eval(a, b) => {
-                let a = f(a);
-                OpOf::Eval(a, f(b))
-            }
-            OpOf::Isa(x) => OpOf::Isa(f(x)),
-            OpOf::Inc(x) => OpOf::Inc(f(x)),
-            OpOf::Eq(a, b) => {
-                let a = f(a);
-                OpOf::Eq(a, f(b))
-            }
-            OpOf::If(c, t, e) => {
-                let c = f(c);
-                let t = f(t);
-                OpOf::If(c, t, f(e))
-            }
-            OpOf::Comp(a, b) => {
-                let a = f(a);
-                OpOf::Comp(a, f(b))
-            }
-            OpOf::Push(a, b) => {
-                let a = f(a);
-                OpOf::Push(a, f(b))
-            }
-            OpOf::Call(ax, x) => OpOf::Call(ax, f(x)),
-            OpOf::Edit(ax, v, x) => {
-                let v = f(v);
-                OpOf::Edit(ax, v, f(x))
-            }
-            OpOf::Hint(t, x) => {
-                let t = f(t);
-                OpOf::Hint(t, f(x))
-            }
-            OpOf::Hintd(t, c, x) => {
-                let t = f(t);
-                let c = f(c);
-                OpOf::Hintd(t, c, f(x))
-            }
-            OpOf::Scry(r, p) => {
-                let r = f(r);
-                OpOf::Scry(r, f(p))
-            }
-        }
-    }
-
-    /// Borrow every argument, cloning axis atoms.
-    pub fn as_ref(&self) -> OpOf<&N> {
-        match self {
-            OpOf::Slot(ax) => OpOf::Slot(ax.clone()),
-            OpOf::Self_ => OpOf::Self_,
-            OpOf::Battery => OpOf::Battery,
-            OpOf::Payload => OpOf::Payload,
-            OpOf::Sample => OpOf::Sample,
-            OpOf::Context => OpOf::Context,
-            OpOf::Crash => OpOf::Crash,
-            OpOf::Const(x) => OpOf::Const(x),
-            OpOf::Arm(x) => OpOf::Arm(x),
-            OpOf::Eval(a, b) => OpOf::Eval(a, b),
-            OpOf::Isa(x) => OpOf::Isa(x),
-            OpOf::Inc(x) => OpOf::Inc(x),
-            OpOf::Eq(a, b) => OpOf::Eq(a, b),
-            OpOf::If(c, t, e) => OpOf::If(c, t, e),
-            OpOf::Comp(a, b) => OpOf::Comp(a, b),
-            OpOf::Push(a, b) => OpOf::Push(a, b),
-            OpOf::Call(ax, x) => OpOf::Call(ax.clone(), x),
-            OpOf::Edit(ax, v, x) => OpOf::Edit(ax.clone(), v, x),
-            OpOf::Hint(t, x) => OpOf::Hint(t, x),
-            OpOf::Hintd(t, c, x) => OpOf::Hintd(t, c, x),
-            OpOf::Scry(r, p) => OpOf::Scry(r, p),
-        }
-    }
-}
-
-impl<N> MatchArmOf<N> {
-    /// Replace the pattern, then the body.
-    pub fn map<M>(self, mut f: impl FnMut(N) -> M) -> MatchArmOf<M> {
-        let pattern = f(self.pattern);
-        let body = f(self.body);
-        MatchArmOf { pattern, body }
-    }
-
-    /// Borrow both positions.
-    pub fn as_ref(&self) -> MatchArmOf<&N> {
-        MatchArmOf {
-            pattern: &self.pattern,
-            body: &self.body,
-        }
+    /// The children, in `map` order.
+    pub fn children(&self) -> Vec<&N> {
+        let mut kids = Vec::new();
+        self.as_ref().map(|child| kids.push(child));
+        kids
     }
 }
 
 // ----------------------------------------------------------------------
-// The bridge to the plain instantiation
+// The refusals
 // ----------------------------------------------------------------------
 
-/// View one layer of plain IR through the vocabulary, children
-/// borrowed: the `Nasm ≅ NasmOf<Nasm>` isomorphism, read one way.
+/// The opcode table, as `Op::name` spells it.
+const OPCODES: &[&str] = &[
+    "slot", "self", "battery", "payload", "sample", "context", "crash", "const", "arm", "eval",
+    "isa", "inc", "eq", "if", "comp", "push", "call", "edit", "hint", "hintd", "scry",
+];
+
+/// Why a [`Noted`] tree has no [`Nasm`] projection: a node the typed
+/// vocabulary cannot hold, which the reference implementations refuse
+/// at lower time under the tag [`tag`](StripError::tag) answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StripError {
+    /// `(%op name ...)` where `name` is not an opcode (`%nock` included:
+    /// it is a case of the vocabulary, not an opcode).
+    UnknownOpcode(String),
+    /// An opcode applied to the wrong number of arguments.
+    OpArity {
+        /// The opcode name, without `%`.
+        op: String,
+        /// How many arguments it was given.
+        got: usize,
+    },
+    /// The axis argument of `%slot`, `%call`, or `%edit` is not an
+    /// atom node.
+    AxisArg {
+        /// The opcode name, without `%`.
+        op: String,
+    },
+    /// A raw cell of fewer than two elements.
+    EmptyRawCell,
+}
+
+impl StripError {
+    /// The reference implementations' crash tag: `unknown-opcode`,
+    /// `op-arity`, `axis-arg-must-be-atom`, or `empty-raw-cell`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            StripError::UnknownOpcode(_) => "unknown-opcode",
+            StripError::OpArity { .. } => "op-arity",
+            StripError::AxisArg { .. } => "axis-arg-must-be-atom",
+            StripError::EmptyRawCell => "empty-raw-cell",
+        }
+    }
+}
+
+impl fmt::Display for StripError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StripError::UnknownOpcode(op) => write!(f, "%unknown-opcode: %{op}"),
+            StripError::OpArity { op, got } => {
+                write!(f, "%op-arity: %{op} applied to {got} arguments")
+            }
+            StripError::AxisArg { op } => {
+                write!(
+                    f,
+                    "%axis-arg-must-be-atom: the axis of %{op} is not an atom"
+                )
+            }
+            StripError::EmptyRawCell => write!(f, "%empty-raw-cell: a raw cell needs two elements"),
+        }
+    }
+}
+
+impl std::error::Error for StripError {}
+
+/// Why annotated IR did not lower: the projection refused it, or the
+/// bare lowering did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpandError {
+    /// No projection: see [`StripError`].
+    Strip(StripError),
+    /// The bare lowering's refusal: see [`LowerError`].
+    Lower(LowerError),
+}
+
+impl fmt::Display for ExpandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExpandError::Strip(e) => write!(f, "{e}"),
+            ExpandError::Lower(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ExpandError {}
+
+impl From<StripError> for ExpandError {
+    fn from(e: StripError) -> ExpandError {
+        ExpandError::Strip(e)
+    }
+}
+
+impl From<LowerError> for ExpandError {
+    fn from(e: LowerError) -> ExpandError {
+        ExpandError::Lower(e)
+    }
+}
+
+// ----------------------------------------------------------------------
+// The two bridges
+// ----------------------------------------------------------------------
+
+/// A child of one unrolled layer: a node of the typed tree, or an
+/// opcode's axis atom, which the untyped vocabulary reads as a node.
+#[derive(Clone)]
+enum Src<'a> {
+    Node(&'a Nasm),
+    Axis(Atom),
+}
+
+/// One child of the typed tree as a layer: a node unrolls, an axis atom
+/// is a leaf.
+fn open_src<'a>(s: &Src<'a>) -> NasmOf<Src<'a>> {
+    match s {
+        &Src::Node(n) => unroll(n),
+        Src::Axis(a) => NasmOf::Atom(a.clone()),
+    }
+}
+
+/// Read one plain node as a layer of the vocabulary, children borrowed;
+/// an opcode's axis argument becomes an atom child.
 ///
 /// Exhaustive over [`Nasm`] and [`Op`] with no wildcard arm — this is
-/// where a variant added to `Nasm` without its `NasmOf` twin fails to
-/// compile (see the module docs). Node data is cloned: atoms and nouns
-/// are refcounted, a name is one string clone.
-pub fn unroll(n: &Nasm) -> NasmOf<&Nasm> {
+/// where a variant added to `Nasm` without its untyped reading fails to
+/// compile (see the module docs). Cheap: children are borrowed, atoms
+/// and nouns are refcounted, a name is one string clone.
+fn unroll(n: &Nasm) -> NasmOf<Src<'_>> {
+    let node = Src::Node;
     match n {
         Nasm::Atom(a) => NasmOf::Atom(a.clone()),
-        Nasm::Axis(name) => NasmOf::Axis(name.clone()),
+        Nasm::Axis(name) => NasmOf::Axis(name.as_str().to_string()),
         Nasm::Cell {
             first,
             second,
             rest,
-        } => NasmOf::Cell {
-            first,
-            second,
-            rest: rest.iter().collect(),
-        },
-        Nasm::Op(op) => NasmOf::Op(match op {
-            Op::Slot(ax) => OpOf::Slot(ax.clone()),
-            Op::Self_ => OpOf::Self_,
-            Op::Battery => OpOf::Battery,
-            Op::Payload => OpOf::Payload,
-            Op::Sample => OpOf::Sample,
-            Op::Context => OpOf::Context,
-            Op::Crash => OpOf::Crash,
-            Op::Const(x) => OpOf::Const(x),
-            Op::Arm(x) => OpOf::Arm(x),
-            Op::Eval(a, b) => OpOf::Eval(a, b),
-            Op::Isa(x) => OpOf::Isa(x),
-            Op::Inc(x) => OpOf::Inc(x),
-            Op::Eq(a, b) => OpOf::Eq(a, b),
-            Op::If(c, t, e) => OpOf::If(c, t, e),
-            Op::Comp(a, b) => OpOf::Comp(a, b),
-            Op::Push(a, b) => OpOf::Push(a, b),
-            Op::Call(ax, x) => OpOf::Call(ax.clone(), x),
-            Op::Edit(ax, v, x) => OpOf::Edit(ax.clone(), v, x),
-            Op::Hint(t, x) => OpOf::Hint(t, x),
-            Op::Hintd(t, c, x) => OpOf::Hintd(t, c, x),
-            Op::Scry(r, p) => OpOf::Scry(r, p),
-        }),
-        Nasm::Let { name, value, body } => NasmOf::Let {
-            name: name.clone(),
-            value,
-            body,
-        },
+        } => NasmOf::Cell(
+            [&**first, &**second]
+                .into_iter()
+                .chain(rest.iter())
+                .map(node)
+                .collect(),
+        ),
+        Nasm::Op(op) => {
+            let axis = |a: &Atom| Src::Axis(a.clone());
+            let args = match op {
+                Op::Slot(ax) => vec![axis(ax)],
+                Op::Self_ | Op::Battery | Op::Payload | Op::Sample | Op::Context | Op::Crash => {
+                    vec![]
+                }
+                Op::Const(x) | Op::Arm(x) | Op::Isa(x) | Op::Inc(x) => vec![node(x)],
+                Op::Eval(a, b)
+                | Op::Eq(a, b)
+                | Op::Comp(a, b)
+                | Op::Push(a, b)
+                | Op::Hint(a, b)
+                | Op::Scry(a, b) => vec![node(a), node(b)],
+                Op::If(a, b, c) | Op::Hintd(a, b, c) => vec![node(a), node(b), node(c)],
+                Op::Call(ax, f) => vec![axis(ax), node(f)],
+                Op::Edit(ax, v, f) => vec![axis(ax), node(v), node(f)],
+            };
+            NasmOf::Op(op.name().to_string(), args)
+        }
+        Nasm::Let { name, value, body } => NasmOf::Let(
+            name.as_str().to_string(),
+            Box::new(node(value)),
+            Box::new(node(body)),
+        ),
         Nasm::Match {
             scrutinee,
             arms,
             default,
-        } => NasmOf::Match {
-            scrutinee,
-            arms: arms
-                .iter()
-                .map(|arm| MatchArmOf {
-                    pattern: &arm.pattern,
-                    body: &arm.body,
-                })
+        } => NasmOf::Match(
+            Box::new(node(scrutinee)),
+            arms.iter()
+                .map(|arm| (node(&arm.pattern), node(&arm.body)))
                 .collect(),
-            default,
-        },
+            Box::new(node(default)),
+        ),
         Nasm::Nock(noun) => NasmOf::Nock(noun.clone()),
     }
 }
 
 /// Close one layer of the vocabulary over plain children: the
-/// `Nasm ≅ NasmOf<Nasm>` isomorphism, read the other way.
-///
-/// Exhaustive over [`NasmOf`] and [`OpOf`] with no wildcard arm — this
-/// is where a variant added to `NasmOf` without its `Nasm` twin fails
-/// to compile (see the module docs).
-pub fn roll(layer: NasmOf<Nasm>) -> Nasm {
-    match layer {
+/// vocabulary check. The opcode name and arity are held to the [`Op`]
+/// table, an axis argument must be an atom node, a raw cell needs two
+/// elements; a name is taken as it is ([`Name::raw`]), the schema
+/// lookup being the bare lowering's business.
+pub fn roll(layer: NasmOf<Nasm>) -> Result<Nasm, StripError> {
+    Ok(match layer {
         NasmOf::Atom(a) => Nasm::Atom(a),
-        NasmOf::Axis(name) => Nasm::Axis(name),
-        NasmOf::Cell {
-            first,
-            second,
-            rest,
-        } => Nasm::Cell {
-            first: Box::new(first),
-            second: Box::new(second),
-            rest,
+        NasmOf::Axis(name) => Nasm::Axis(Name::raw(name)),
+        NasmOf::Cell(items) => Nasm::raw_cell(items).ok_or(StripError::EmptyRawCell)?,
+        NasmOf::Op(name, args) => Nasm::Op(op_of(name, args)?),
+        NasmOf::Let(name, value, body) => Nasm::Let {
+            name: Name::raw(name),
+            value,
+            body,
         },
-        NasmOf::Op(op) => Nasm::Op(match op {
-            OpOf::Slot(ax) => Op::Slot(ax),
-            OpOf::Self_ => Op::Self_,
-            OpOf::Battery => Op::Battery,
-            OpOf::Payload => Op::Payload,
-            OpOf::Sample => Op::Sample,
-            OpOf::Context => Op::Context,
-            OpOf::Crash => Op::Crash,
-            OpOf::Const(x) => Op::Const(Box::new(x)),
-            OpOf::Arm(x) => Op::Arm(Box::new(x)),
-            OpOf::Eval(a, b) => Op::Eval(Box::new(a), Box::new(b)),
-            OpOf::Isa(x) => Op::Isa(Box::new(x)),
-            OpOf::Inc(x) => Op::Inc(Box::new(x)),
-            OpOf::Eq(a, b) => Op::Eq(Box::new(a), Box::new(b)),
-            OpOf::If(c, t, e) => Op::If(Box::new(c), Box::new(t), Box::new(e)),
-            OpOf::Comp(a, b) => Op::Comp(Box::new(a), Box::new(b)),
-            OpOf::Push(a, b) => Op::Push(Box::new(a), Box::new(b)),
-            OpOf::Call(ax, x) => Op::Call(ax, Box::new(x)),
-            OpOf::Edit(ax, v, x) => Op::Edit(ax, Box::new(v), Box::new(x)),
-            OpOf::Hint(t, x) => Op::Hint(Box::new(t), Box::new(x)),
-            OpOf::Hintd(t, c, x) => Op::Hintd(Box::new(t), Box::new(c), Box::new(x)),
-            OpOf::Scry(r, p) => Op::Scry(Box::new(r), Box::new(p)),
-        }),
-        NasmOf::Let { name, value, body } => Nasm::Let {
-            name,
-            value: Box::new(value),
-            body: Box::new(body),
-        },
-        NasmOf::Match {
+        NasmOf::Match(scrutinee, arms, default) => Nasm::Match {
             scrutinee,
-            arms,
-            default,
-        } => Nasm::Match {
-            scrutinee: Box::new(scrutinee),
             arms: arms
                 .into_iter()
-                .map(|arm| MatchArm {
-                    pattern: arm.pattern,
-                    body: arm.body,
-                })
+                .map(|(pattern, body)| MatchArm { pattern, body })
                 .collect(),
-            default: Box::new(default),
+            default,
         },
         NasmOf::Nock(noun) => Nasm::Nock(noun),
-    }
+    })
+}
+
+/// `(%name args...)` against the opcode table.
+fn op_of(name: String, args: Vec<Nasm>) -> Result<Op, StripError> {
+    let got = args.len();
+    let axis = |x: Nasm| match &x {
+        Nasm::Atom(a) => Ok(a.clone()),
+        _ => Err(StripError::AxisArg { op: name.clone() }),
+    };
+    let mut it = args.into_iter();
+    let mut arg = || Box::new(it.next().expect("the arity was checked"));
+    Ok(match (name.as_str(), got) {
+        ("slot", 1) => Op::Slot(axis(*arg())?),
+        ("self", 0) => Op::Self_,
+        ("battery", 0) => Op::Battery,
+        ("payload", 0) => Op::Payload,
+        ("sample", 0) => Op::Sample,
+        ("context", 0) => Op::Context,
+        ("crash", 0) => Op::Crash,
+        ("const", 1) => Op::Const(arg()),
+        ("arm", 1) => Op::Arm(arg()),
+        ("eval", 2) => Op::Eval(arg(), arg()),
+        ("isa", 1) => Op::Isa(arg()),
+        ("inc", 1) => Op::Inc(arg()),
+        ("eq", 2) => Op::Eq(arg(), arg()),
+        ("if", 3) => Op::If(arg(), arg(), arg()),
+        ("comp", 2) => Op::Comp(arg(), arg()),
+        ("push", 2) => Op::Push(arg(), arg()),
+        ("call", 2) => {
+            let ax = axis(*arg())?;
+            Op::Call(ax, arg())
+        }
+        ("edit", 3) => {
+            let ax = axis(*arg())?;
+            Op::Edit(ax, arg(), arg())
+        }
+        ("hint", 2) => Op::Hint(arg(), arg()),
+        ("hintd", 3) => Op::Hintd(arg(), arg(), arg()),
+        ("scry", 2) => Op::Scry(arg(), arg()),
+        (known, _) if OPCODES.contains(&known) => {
+            return Err(StripError::OpArity { op: name, got });
+        }
+        (_, _) => return Err(StripError::UnknownOpcode(name)),
+    })
 }
 
 // ----------------------------------------------------------------------
@@ -569,39 +493,36 @@ pub fn roll(layer: NasmOf<Nasm>) -> Nasm {
 // ----------------------------------------------------------------------
 
 /// One pending step of a [`fold`].
-enum Task<'a, S> {
+enum Task<S> {
     /// Open this node and schedule its children.
-    Visit(&'a S),
+    Visit(S),
     /// Every child of `layer` has a result on the value stack; refill
     /// the layer with them and close it.
     Build {
-        source: &'a S,
-        layer: NasmOf<&'a S>,
+        source: S,
+        layer: NasmOf<()>,
         count: usize,
     },
 }
 
 /// Post-order fold over any tree that reads as layers of the
-/// vocabulary, on an explicit stack: `open` views one node with its
-/// children borrowed, `close` builds a node's result from the node and
-/// the results of its children. Children are enumerated through
-/// [`NasmOf::map`] itself, so the order they are visited in and the
-/// order their results are handed back in cannot disagree.
-fn fold<'a, S, R>(
-    root: &'a S,
-    open: impl Fn(&'a S) -> NasmOf<&'a S>,
-    mut close: impl FnMut(&'a S, NasmOf<R>) -> R,
-) -> R {
-    let mut tasks: Vec<Task<'a, S>> = vec![Task::Visit(root)];
+/// vocabulary, on an explicit stack: `open` views one node as a layer
+/// over its children, `close` builds a node's result from the node and
+/// the results of its children, or refuses. Children are enumerated
+/// through [`NasmOf::map`] itself, so the order they are visited in and
+/// the order their results are handed back in cannot disagree.
+fn fold<S, R, E>(
+    root: S,
+    open: impl Fn(&S) -> NasmOf<S>,
+    mut close: impl FnMut(S, NasmOf<R>) -> Result<R, E>,
+) -> Result<R, E> {
+    let mut tasks: Vec<Task<S>> = vec![Task::Visit(root)];
     let mut done: Vec<R> = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
             Task::Visit(source) => {
-                let mut kids: Vec<&'a S> = Vec::new();
-                let layer = open(source).map(|child| {
-                    kids.push(child);
-                    child
-                });
+                let mut kids: Vec<S> = Vec::new();
+                let layer = open(&source).map(|child| kids.push(child));
                 tasks.push(Task::Build {
                     source,
                     layer,
@@ -620,52 +541,60 @@ fn fold<'a, S, R>(
                     .drain(done.len() - count..)
                     .collect::<Vec<R>>()
                     .into_iter();
-                let filled = layer.map(|_| results.next().expect("one result per child"));
+                let filled = layer.map(|()| results.next().expect("one result per child"));
                 debug_assert!(results.next().is_none(), "no result left over");
-                done.push(close(source, filled));
+                done.push(close(source, filled)?);
             }
         }
     }
     debug_assert_eq!(done.len(), 1, "every fold yields one result");
-    done.pop().expect("the root result")
+    Ok(done.pop().expect("the root result"))
 }
 
 // ----------------------------------------------------------------------
 // The annotated instantiation
 // ----------------------------------------------------------------------
 
-/// The annotated instantiation of the vocabulary: every node carries a
-/// note of type `A` beside its [`NasmOf`] layer, whose children are
-/// again `Noted<A>`.
+/// `+$ noted`: the annotated instantiation of the vocabulary. Every
+/// node carries a note of type `A` beside its [`NasmOf`] layer, whose
+/// children are again `Noted<A>`.
 ///
-/// `Noted<()>` is plain IR in all but name; `Noted<Option<Pos>>` is a
-/// positioned IR. The fields are public — a compiler builds these
-/// directly — but, like [`Nasm`], the type implements `Drop` (so that
-/// deep trees tear down iteratively), which means it cannot be
-/// destructured by value; borrow the fields, or `strip` / `map_note`.
+/// `Noted<()>` is the reference vocabulary in all but name;
+/// `Noted<Option<Pos>>` is a positioned IR. The fields are public — a
+/// compiler builds these directly — but, like [`Nasm`], the type
+/// implements `Drop` (so that deep trees tear down iteratively), which
+/// means it cannot be destructured by value; borrow the fields, or
+/// `strip` / `map_note`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Noted<A> {
     /// The annotation.
     pub note: A,
     /// The node, with annotated children.
-    pub node: NasmOf<Box<Noted<A>>>,
+    pub node: NasmOf<Noted<A>>,
 }
 
 impl<A> Noted<A> {
-    /// One layer with the children borrowed through their boxes.
-    fn open(&self) -> NasmOf<&Noted<A>> {
-        self.node.as_ref().map(|child| &**child)
+    /// A node.
+    pub fn new(note: A, node: NasmOf<Noted<A>>) -> Noted<A> {
+        Noted { note, node }
     }
 
-    /// Project onto the bare IR: drop every note, recurse.
+    /// One layer with the children borrowed.
+    fn open(&self) -> NasmOf<&Noted<A>> {
+        self.node.as_ref()
+    }
+
+    /// Project onto the bare IR: drop every note, check the vocabulary,
+    /// recurse.
     ///
     /// This is the strip contract of the module docs —
-    /// `Noted::from_nasm(&n, a).strip() == n` — and the meaning of an
+    /// `Noted::dress(&n, a).strip() == Ok(n)` — and the meaning of an
     /// annotated value is the meaning of its projection. Runs on an
-    /// explicit stack; total; every node's data is cloned once (atoms
-    /// and nouns are refcounted, names are string clones).
-    pub fn strip(&self) -> Nasm {
-        fold(self, Noted::open, |_, layer| roll(layer))
+    /// explicit stack; every node's data is cloned once (atoms and
+    /// nouns are refcounted, names are string clones). Refuses, with
+    /// the reference crash tag, a node the typed vocabulary cannot hold.
+    pub fn strip(&self) -> Result<Nasm, StripError> {
+        fold(self, |n| n.open(), |_, layer| roll(layer))
     }
 
     /// Rewrite every note, keeping the tree: `strip` of the result is
@@ -677,22 +606,53 @@ impl<A> Noted<A> {
     /// this crate forbids unsafe. A `FnMut(&A) -> B` covers the
     /// by-value shape anyway (clone inside the closure when `B = A`).
     pub fn map_note<B>(&self, mut f: impl FnMut(&A) -> B) -> Noted<B> {
-        fold(self, Noted::open, |n, layer| Noted {
-            note: f(&n.note),
-            node: layer.map(Box::new),
-        })
+        let done: Result<Noted<B>, std::convert::Infallible> = fold(
+            self,
+            |n| n.open(),
+            |n, layer| Ok(Noted::new(f(&n.note), layer)),
+        );
+        match done {
+            Ok(x) => x,
+        }
+    }
+
+    /// The notes, in post-order (the order `map_note` visits).
+    pub fn notes(&self) -> Vec<&A> {
+        let mut out = Vec::new();
+        let done: Result<(), std::convert::Infallible> = fold(
+            self,
+            |n| n.open(),
+            |n, _| {
+                out.push(&n.note);
+                Ok(())
+            },
+        );
+        match done {
+            Ok(()) => out,
+        }
     }
 }
 
 impl<A: Clone> Noted<A> {
     /// Annotate plain IR with the same note on every node: a section
-    /// of [`strip`](Noted::strip), so `Noted::from_nasm(&n, a).strip()
-    /// == n` for every `n`. Runs on an explicit stack; total.
-    pub fn from_nasm(n: &Nasm, note: A) -> Noted<A> {
-        fold(n, unroll, |_, layer| Noted {
-            note: note.clone(),
-            node: layer.map(Box::new),
-        })
+    /// of [`strip`](Noted::strip), so `Noted::dress(&n, a).strip() ==
+    /// Ok(n)` for every `n`. An opcode's axis atom becomes an atom node
+    /// with the note. Runs on an explicit stack; total.
+    pub fn dress(n: &Nasm, note: A) -> Noted<A> {
+        let done: Result<Noted<A>, std::convert::Infallible> =
+            fold(Src::Node(n), open_src, |_, layer| {
+                Ok(Noted::new(note.clone(), layer))
+            });
+        match done {
+            Ok(x) => x,
+        }
+    }
+
+    /// [`crate::lift`], dressed: a formula as annotated IR with the same
+    /// note on every node, so that `lower(None, &Noted::lift(&f, a))`
+    /// is `f` (the lift's soundness law, through the projection).
+    pub fn lift(formula: &Noun, note: A) -> Noted<A> {
+        Noted::dress(&crate::lift(formula), note)
     }
 }
 
@@ -700,7 +660,7 @@ impl<A: Clone> Noted<A> {
 /// its place. The children's own nodes are untouched here — each is
 /// hollowed in turn when it is popped — so no node is ever dropped
 /// with more than one live layer beneath it.
-fn hollow<A>(node: &mut NasmOf<Box<Noted<A>>>, stack: &mut Vec<Box<Noted<A>>>) {
+fn hollow<A>(node: &mut NasmOf<Noted<A>>, stack: &mut Vec<Noted<A>>) {
     if node.is_leaf() {
         return;
     }
@@ -711,13 +671,13 @@ impl<A> Drop for Noted<A> {
     /// Iterative teardown, in the style of `Nasm`'s: a positioned
     /// emitter can produce IR as deep as its input, so dropping must
     /// not recurse. Each popped child is hollowed into `stack` before
-    /// it drops, leaving only its note and its box for the normal glue
-    /// to free — and its own `Drop`, finding a leaf, returns at once.
+    /// it drops, leaving only its note for the normal glue to free —
+    /// and its own `Drop`, finding a leaf, returns at once.
     fn drop(&mut self) {
         if self.node.is_leaf() {
             return;
         }
-        let mut stack: Vec<Box<Noted<A>>> = Vec::new();
+        let mut stack: Vec<Noted<A>> = Vec::new();
         hollow(&mut self.node, &mut stack);
         while let Some(mut child) = stack.pop() {
             hollow(&mut child.node, &mut stack);
@@ -730,17 +690,17 @@ impl<A> Drop for Noted<A> {
 // ----------------------------------------------------------------------
 
 /// Lower annotated IR to its canonical Nock noun:
-/// [`crate::lower`]`(schema, &expr.strip())`.
-pub fn lower<A>(schema: Option<&Schema>, expr: &Noted<A>) -> Result<Noun, LowerError> {
-    crate::lower(schema, &expr.strip())
+/// [`crate::lower`]`(schema, &expr.strip()?)`.
+pub fn lower<A>(schema: Option<&Schema>, expr: &Noted<A>) -> Result<Noun, ExpandError> {
+    Ok(crate::lower(schema, &expr.strip()?)?)
 }
 
 /// Render annotated IR to canonical `.nasm` source:
-/// [`crate::render`]`(schema, &expr.strip())`. Notes do not render —
+/// [`crate::render`]`(schema, &expr.strip()?)`. Notes do not render —
 /// the canonical text is byte-identical across implementations and
 /// carries no annotations by design.
-pub fn render<A>(schema: Option<&Schema>, expr: &Noted<A>) -> String {
-    crate::render(schema, &expr.strip())
+pub fn render<A>(schema: Option<&Schema>, expr: &Noted<A>) -> Result<String, StripError> {
+    Ok(crate::render(schema, &expr.strip()?))
 }
 
 #[cfg(test)]
@@ -798,71 +758,86 @@ mod tests {
             .collect()
     }
 
-    /// The kinds and opcode names present in a tree, by an iterative
-    /// walk through `unroll`.
-    fn inventory(n: &Nasm) -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {
+    /// The kinds and opcode names present in an annotated tree, by an
+    /// iterative walk.
+    fn inventory<A>(n: &Noted<A>) -> (BTreeSet<&'static str>, BTreeSet<String>) {
         let mut kinds = BTreeSet::new();
         let mut ops = BTreeSet::new();
         let mut stack = vec![n];
         while let Some(n) = stack.pop() {
-            let layer = unroll(n);
-            kinds.insert(match &layer {
-                NasmOf::Atom(_) => "atom",
-                NasmOf::Axis(_) => "axis",
-                NasmOf::Cell { .. } => "cell",
-                NasmOf::Op(op) => {
-                    ops.insert(op.name());
-                    "op"
-                }
-                NasmOf::Let { .. } => "let",
-                NasmOf::Match { .. } => "match",
-                NasmOf::Nock(_) => "nock",
-            });
-            layer.map(|child| stack.push(child));
+            kinds.insert(n.node.kind());
+            if let NasmOf::Op(name, _) = &n.node {
+                ops.insert(name.clone());
+            }
+            stack.extend(n.node.children());
         }
         (kinds, ops)
     }
 
-    const ALL_OPS: &[&str] = &[
-        "slot", "self", "battery", "payload", "sample", "context", "crash", "const", "arm", "eval",
-        "isa", "inc", "eq", "if", "comp", "push", "call", "edit", "hint", "hintd", "scry",
-    ];
+    /// The nodes of a typed tree, counting an opcode's axis atom as one
+    /// (the untyped reading does).
+    fn typed_nodes(n: &Nasm) -> usize {
+        let mut count = 0;
+        let mut stack = vec![Src::Node(n)];
+        while let Some(s) = stack.pop() {
+            count += 1;
+            if let Src::Node(n) = s {
+                stack.extend(unroll(n).children().into_iter().cloned());
+            }
+        }
+        count
+    }
+
+    fn all_ops() -> BTreeSet<String> {
+        OPCODES.iter().map(|s| s.to_string()).collect()
+    }
 
     #[test]
     fn samples_cover_the_vocabulary() {
         let mut kinds = BTreeSet::new();
         let mut ops = BTreeSet::new();
         for (_, program) in samples() {
-            let (k, o) = inventory(&program.body);
+            let (k, o) = inventory(&Noted::dress(&program.body, ()));
             kinds.extend(k);
             ops.extend(o);
         }
         let want_kinds: BTreeSet<&str> = ["atom", "axis", "cell", "op", "let", "match", "nock"]
             .into_iter()
             .collect();
-        assert_eq!(kinds, want_kinds, "every Nasm variant is sampled");
-        assert_eq!(
-            ops,
-            ALL_OPS.iter().copied().collect(),
-            "every Op variant is sampled"
-        );
+        assert_eq!(kinds, want_kinds, "every case is sampled");
+        assert_eq!(ops, all_ops(), "every opcode is sampled");
     }
 
     #[test]
-    fn strip_undoes_from_nasm() {
-        for (src, program) in samples() {
-            let unit = Noted::from_nasm(&program.body, ());
-            assert_eq!(unit.strip(), program.body, "{src}");
-            let tagged = Noted::from_nasm(&program.body, src);
-            assert_eq!(tagged.strip(), program.body, "{src}");
+    fn the_opcode_table_is_the_op_enum() {
+        // every `Op` variant's name, read off the samples through
+        // `unroll`, is in the table, and the table has nothing else
+        let mut seen = BTreeSet::new();
+        for (_, program) in samples() {
+            let mut stack = vec![&program.body];
+            while let Some(n) = stack.pop() {
+                if let Nasm::Op(op) = n {
+                    seen.insert(op.name().to_string());
+                }
+                for child in unroll(n).children() {
+                    if let Src::Node(c) = child {
+                        stack.push(c);
+                    }
+                }
+            }
         }
+        assert_eq!(seen, all_ops());
     }
 
     #[test]
-    fn roll_undoes_unroll() {
+    fn strip_undoes_dress() {
         for (src, program) in samples() {
-            let n = &program.body;
-            assert_eq!(roll(unroll(n).map(Nasm::clone)), *n, "{src}");
+            let unit = Noted::dress(&program.body, ());
+            assert_eq!(unit.strip(), Ok(program.body.clone()), "{src}");
+            let tagged = Noted::dress(&program.body, src);
+            assert_eq!(tagged.strip(), Ok(program.body.clone()), "{src}");
+            let renamed = tagged.map_note(|s| s.len());
+            assert_eq!(renamed.strip(), Ok(program.body.clone()), "{src}: map_note");
         }
     }
 
@@ -870,32 +845,29 @@ mod tests {
     fn lower_and_render_agree_with_the_bare_pipeline() {
         for (src, program) in samples() {
             let schema = program.schema.as_ref();
-            let noted = Noted::from_nasm(&program.body, 7u8);
+            let noted = Noted::dress(&program.body, 7u8);
             let want = expand(src).unwrap_or_else(|e| panic!("{src}: {e}"));
             assert_eq!(program.lower().unwrap(), want, "{src}");
             assert_eq!(lower(schema, &noted).unwrap(), want, "{src}: lower");
-            assert_eq!(render(schema, &noted), program.render(), "{src}: render");
+            assert_eq!(
+                render(schema, &noted).unwrap(),
+                program.render(),
+                "{src}: render"
+            );
         }
     }
 
     #[test]
-    fn from_nasm_puts_the_note_on_every_node() {
+    fn dress_puts_the_note_on_every_node() {
         for (src, program) in samples() {
-            let noted = Noted::from_nasm(&program.body, src);
-            let mut stack = vec![&noted];
-            let mut count = 0usize;
-            while let Some(n) = stack.pop() {
-                assert_eq!(n.note, src);
-                count += 1;
-                n.node.as_ref().map(|child| stack.push(child));
-            }
-            let mut plain = 0usize;
-            let mut stack = vec![&program.body];
-            while let Some(n) = stack.pop() {
-                plain += 1;
-                unroll(n).map(|child| stack.push(child));
-            }
-            assert_eq!(count, plain, "{src}: one note per node");
+            let noted = Noted::dress(&program.body, src);
+            let notes = noted.notes();
+            assert!(notes.iter().all(|n| **n == src), "{src}");
+            assert_eq!(
+                notes.len(),
+                typed_nodes(&program.body),
+                "{src}: one note per node"
+            );
         }
     }
 
@@ -904,25 +876,24 @@ mod tests {
     // kept distinct — so a field mislabelled in `roll`/`unroll` (a
     // swapped `%if` branch, a `#let` value for its body) shows up
     // against the parser and the expander, not just against itself.
-
-    type Node = Box<Noted<u32>>;
-
-    fn bx(note: u32, node: NasmOf<Node>) -> Node {
-        Box::new(Noted { note, node })
-    }
+    // The axis atoms of `%slot`, `%call`, and `%edit` are nodes with
+    // notes of their own, which the typed tree has no place for.
+    type Node = Noted<u32>;
     fn atom(note: u32, v: u64) -> Node {
-        bx(note, NasmOf::Atom(Atom::from(v)))
+        Noted::new(note, NasmOf::Atom(Atom::from(v)))
     }
     fn cord(note: u32, s: &str) -> Node {
-        bx(note, NasmOf::Atom(Atom::from_cord(s)))
+        Noted::new(note, NasmOf::Atom(Atom::from_cord(s)))
     }
     fn axis(note: u32, name: &str) -> Node {
-        bx(note, NasmOf::Axis(Name::new(name).unwrap()))
+        Noted::new(note, NasmOf::Axis(name.into()))
     }
-    fn op(note: u32, op: OpOf<Node>) -> Node {
-        bx(note, NasmOf::Op(op))
+    fn op(note: u32, name: &str, args: Vec<Node>) -> Node {
+        Noted::new(note, NasmOf::Op(name.into(), args))
     }
-
+    fn cell(note: u32, items: Vec<Node>) -> Node {
+        Noted::new(note, NasmOf::Cell(items))
+    }
     const HAND_BUILT_SRC: &str = "\
 :subject {.a .b}
 #let .v = (%eval (%const [1 2]) (%if .a (%inc .b) (%crash))) in
@@ -933,131 +904,117 @@ mod tests {
   _ => (%nock [0 1])
 }
 ";
-
+    const HAND_BUILT_NOTES: u32 = 49;
     fn hand_built() -> Noted<u32> {
         let value = op(
             1,
-            OpOf::Eval(
-                op(
-                    2,
-                    OpOf::Const(bx(
-                        3,
-                        NasmOf::Cell {
-                            first: atom(4, 1),
-                            second: atom(5, 2),
-                            rest: vec![],
-                        },
-                    )),
-                ),
+            "eval",
+            vec![
+                op(2, "const", vec![cell(3, vec![atom(4, 1), atom(5, 2)])]),
                 op(
                     6,
-                    OpOf::If(
+                    "if",
+                    vec![
                         axis(7, "a"),
-                        op(8, OpOf::Inc(axis(9, "b"))),
-                        op(10, OpOf::Crash),
-                    ),
+                        op(8, "inc", vec![axis(9, "b")]),
+                        op(10, "crash", vec![]),
+                    ],
                 ),
-            ),
+            ],
         );
         let scrutinee = op(
             11,
-            OpOf::Edit(
-                Atom::from(6u64),
-                op(12, OpOf::Call(Atom::from(2u64), axis(13, "v"))),
+            "edit",
+            vec![
+                atom(46, 6),
+                op(12, "call", vec![atom(47, 2), axis(13, "v")]),
                 op(
                     14,
-                    OpOf::Hintd(
+                    "hintd",
+                    vec![
                         cord(15, "memo"),
-                        op(16, OpOf::Comp(axis(17, "a"), axis(18, "b"))),
+                        op(16, "comp", vec![axis(17, "a"), axis(18, "b")]),
                         op(
                             19,
-                            OpOf::Push(
-                                op(20, OpOf::Scry(axis(21, "a"), axis(22, "b"))),
+                            "push",
+                            vec![
+                                op(20, "scry", vec![axis(21, "a"), axis(22, "b")]),
                                 op(
                                     23,
-                                    OpOf::Hint(
+                                    "hint",
+                                    vec![
                                         cord(24, "fast"),
-                                        bx(
-                                            25,
-                                            NasmOf::Cell {
-                                                first: axis(26, "a"),
-                                                second: axis(27, "b"),
-                                                rest: vec![atom(28, 7)],
-                                            },
-                                        ),
-                                    ),
+                                        cell(25, vec![axis(26, "a"), axis(27, "b"), atom(28, 7)]),
+                                    ],
                                 ),
-                            ),
+                            ],
                         ),
-                    ),
+                    ],
                 ),
-            ),
+            ],
         );
         let arms = vec![
-            MatchArmOf {
-                pattern: atom(29, 1),
-                body: op(30, OpOf::Eq(axis(31, "a"), axis(32, "b"))),
-            },
-            MatchArmOf {
-                pattern: cord(33, "two"),
-                body: op(34, OpOf::Arm(op(35, OpOf::Isa(op(36, OpOf::Self_))))),
-            },
-            MatchArmOf {
-                pattern: atom(37, 3),
-                body: bx(
+            (
+                atom(29, 1),
+                op(30, "eq", vec![axis(31, "a"), axis(32, "b")]),
+            ),
+            (
+                cord(33, "two"),
+                op(34, "arm", vec![op(35, "isa", vec![op(36, "self", vec![])])]),
+            ),
+            (
+                atom(37, 3),
+                cell(
                     38,
-                    NasmOf::Cell {
-                        first: op(39, OpOf::Battery),
-                        second: op(40, OpOf::Payload),
-                        rest: vec![
-                            op(41, OpOf::Sample),
-                            op(42, OpOf::Context),
-                            op(43, OpOf::Slot(Atom::from(5u64))),
-                        ],
-                    },
+                    vec![
+                        op(39, "battery", vec![]),
+                        op(40, "payload", vec![]),
+                        op(41, "sample", vec![]),
+                        op(42, "context", vec![]),
+                        op(43, "slot", vec![atom(48, 5)]),
+                    ],
                 ),
-            },
+            ),
         ];
-        let default = bx(44, NasmOf::Nock(noun![0 1]));
-        let body = bx(
+        let default = Noted::new(44, NasmOf::Nock(noun![0 1]));
+        let body = Noted::new(
             45,
-            NasmOf::Match {
-                scrutinee,
-                arms,
-                default,
-            },
+            NasmOf::Match(Box::new(scrutinee), arms, Box::new(default)),
         );
-        Noted {
-            note: 0,
-            node: NasmOf::Let {
-                name: Name::new("v").unwrap(),
-                value,
-                body,
-            },
-        }
+        Noted::new(0, NasmOf::Let("v".into(), Box::new(value), Box::new(body)))
     }
 
     #[test]
     fn hand_built_tree_covers_the_vocabulary() {
-        let (kinds, ops) = inventory(&hand_built().strip());
-        assert_eq!(kinds.len(), 7, "every Nasm variant: {kinds:?}");
-        assert_eq!(ops, ALL_OPS.iter().copied().collect::<BTreeSet<_>>());
+        let (kinds, ops) = inventory(&hand_built());
+        assert_eq!(kinds.len(), 7, "every case: {kinds:?}");
+        assert_eq!(ops, all_ops());
     }
 
     #[test]
     fn hand_built_tree_matches_parser_expander_and_renderer() {
         let program = parse(HAND_BUILT_SRC).expect("parses");
         let ours = hand_built();
-        assert_eq!(ours.strip(), program.body, "strip agrees with parse");
+        assert_eq!(
+            ours.strip(),
+            Ok(program.body.clone()),
+            "strip agrees with parse"
+        );
         let schema = program.schema.as_ref();
         let want = expand(HAND_BUILT_SRC).expect("expands");
         assert_eq!(lower(schema, &ours).expect("lowers"), want);
-        assert_eq!(render(schema, &ours), program.render());
+        assert_eq!(render(schema, &ours).unwrap(), program.render());
         assert_eq!(
-            expand(&render(schema, &ours)).expect("re-expands"),
+            expand(&render(schema, &ours).unwrap()).expect("re-expands"),
             want,
             "round trip through the renderer"
         );
+        // and dressing the parse gives the same tree up to the notes
+        assert_eq!(
+            Noted::dress(&program.body, 0).strip(),
+            ours.map_note(|_| 0).strip()
+        );
+        assert_eq!(Noted::dress(&program.body, 0), ours.map_note(|_| 0));
     }
 
     #[test]
@@ -1069,152 +1026,128 @@ mod tests {
             n + 100
         });
         seen.sort_unstable();
-        assert_eq!(seen, (0..=45).collect::<Vec<u32>>(), "each note once");
-        let mut notes: Vec<u32> = Vec::new();
-        let mut stack = vec![&shifted];
-        while let Some(n) = stack.pop() {
-            notes.push(n.note);
-            n.node.as_ref().map(|child| stack.push(child));
-        }
-        notes.sort_unstable();
-        assert_eq!(notes, (100..=145).collect::<Vec<u32>>());
-        assert_eq!(shifted.strip(), ours.strip());
-        // Identity on the notes is identity on the value.
-        assert_eq!(ours.map_note(|n| *n), ours);
-    }
-
-    /// The Hoon reference's `test-vocabulary-instantiation`, verbatim
-    /// in shape: a span-noted tree projects onto plain IR and lowers to
-    /// the expansion of the equivalent source.
-    #[test]
-    fn hoon_vocabulary_instantiation_test() {
-        type Span = (u32, u32);
-        let ex: Noted<Span> = Noted {
-            note: (1, 1),
-            node: NasmOf::Let {
-                name: Name::new("d").unwrap(),
-                value: Box::new(Noted {
-                    note: (1, 10),
-                    node: NasmOf::Op(OpOf::Inc(Box::new(Noted {
-                        note: (1, 15),
-                        node: NasmOf::Axis(Name::new("x").unwrap()),
-                    }))),
-                }),
-                body: Box::new(Noted {
-                    note: (2, 1),
-                    node: NasmOf::Nock(noun![0 2]),
-                }),
-            },
-        };
-        let schema = Schema::Leaf(Name::new("x").unwrap());
         assert_eq!(
-            lower(Some(&schema), &ex).expect("lowers"),
-            expand(":subject .x  #let .d = (%inc .x) in (%nock [0 2])").expect("expands"),
+            seen,
+            (0..HAND_BUILT_NOTES).collect::<Vec<u32>>(),
+            "each note once"
         );
+        let mut notes: Vec<u32> = shifted.notes().into_iter().copied().collect();
+        notes.sort_unstable();
+        assert_eq!(notes, (100..100 + HAND_BUILT_NOTES).collect::<Vec<u32>>());
+        assert_eq!(shifted.strip(), ours.strip());
     }
 
     #[test]
-    fn op_names_agree() {
-        for (src, program) in samples() {
-            let mut stack = vec![&program.body];
-            while let Some(n) = stack.pop() {
-                let layer = unroll(n);
-                if let (Nasm::Op(op), NasmOf::Op(generic)) = (n, &layer) {
-                    assert_eq!(op.name(), generic.name(), "{src}");
-                }
-                layer.map(|child| stack.push(child));
-            }
+    fn axis_atoms_keep_their_notes() {
+        // the three axis arguments are nodes 46, 47, 48 in the hand-built
+        // tree; the typed projection holds their atoms and forgets the
+        // notes, and dressing the projection gives them the note back
+        let ours = hand_built();
+        let notes: BTreeSet<u32> = ours.notes().into_iter().copied().collect();
+        assert!(notes.contains(&46) && notes.contains(&47) && notes.contains(&48));
+        let program = parse(HAND_BUILT_SRC).expect("parses");
+        let count = Noted::dress(&program.body, ()).notes().len();
+        assert_eq!(count as u32, HAND_BUILT_NOTES);
+    }
+
+    #[test]
+    fn strip_refuses_what_the_typed_vocabulary_cannot_hold() {
+        let n = |node| Noted::new((), node);
+        let one = || n(NasmOf::Atom(Atom::from(1u64)));
+        let cases: Vec<(Noted<()>, &str)> = vec![
+            (n(NasmOf::Op("frob".into(), vec![])), "unknown-opcode"),
+            (n(NasmOf::Op("nock".into(), vec![one()])), "unknown-opcode"),
+            (n(NasmOf::Op("inc".into(), vec![])), "op-arity"),
+            (n(NasmOf::Op("crash".into(), vec![one()])), "op-arity"),
+            (n(NasmOf::Op("if".into(), vec![one(), one()])), "op-arity"),
+            (
+                n(NasmOf::Op(
+                    "slot".into(),
+                    vec![n(NasmOf::Op("inc".into(), vec![one()]))],
+                )),
+                "axis-arg-must-be-atom",
+            ),
+            (
+                n(NasmOf::Op(
+                    "call".into(),
+                    vec![n(NasmOf::Axis("a".into())), one()],
+                )),
+                "axis-arg-must-be-atom",
+            ),
+            (
+                n(NasmOf::Op(
+                    "edit".into(),
+                    vec![n(NasmOf::Cell(vec![one(), one()])), one(), one()],
+                )),
+                "axis-arg-must-be-atom",
+            ),
+            (n(NasmOf::Cell(vec![])), "empty-raw-cell"),
+            (n(NasmOf::Cell(vec![one()])), "empty-raw-cell"),
+            // deep inside, under a well-formed node
+            (
+                n(NasmOf::Let(
+                    "x".into(),
+                    Box::new(one()),
+                    Box::new(n(NasmOf::Op("inc".into(), vec![n(NasmOf::Cell(vec![]))]))),
+                )),
+                "empty-raw-cell",
+            ),
+        ];
+        for (tree, tag) in cases {
+            let err = tree.strip().expect_err(tag);
+            assert_eq!(err.tag(), tag, "{err}");
+            assert!(matches!(lower(None, &tree), Err(ExpandError::Strip(e)) if e == err));
         }
+        // a well-formed op with a bad name is a lower-time refusal of
+        // the bare pipeline, not of the projection
+        let unbound = n(NasmOf::Axis("nowhere".into()));
+        assert!(unbound.strip().is_ok());
+        assert!(matches!(lower(None, &unbound), Err(ExpandError::Lower(_))));
     }
 
-    /// Conversion and teardown at a depth no recursive walk survives on
-    /// a 2 MiB stack — the same discipline `Nasm` is held to.
     #[test]
-    fn deep_annotated_ir_converts_and_drops_iteratively() {
-        const DEPTH: usize = 100_000;
-        let handle = std::thread::Builder::new()
+    fn the_untyped_reading_of_an_axis_is_an_atom_node() {
+        let program = parse("(%edit 6 (%inc (%slot 1)) (%slot 1))").unwrap();
+        let noted = Noted::dress(&program.body, ());
+        let NasmOf::Op(name, args) = &noted.node else {
+            panic!("an op")
+        };
+        assert_eq!(name, "edit");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].node, NasmOf::Atom(Atom::from(6u64)));
+    }
+
+    /// A left-deep chain of `depth` `%inc`s, built iteratively.
+    fn deep(depth: usize) -> Noted<u8> {
+        let mut n = Noted::new(0, NasmOf::Op("slot".into(), vec![atom8(1)]));
+        for _ in 0..depth {
+            n = Noted::new(0, NasmOf::Op("inc".into(), vec![n]));
+        }
+        n
+    }
+    fn atom8(v: u64) -> Noted<u8> {
+        Noted::new(0, NasmOf::Atom(Atom::from(v)))
+    }
+
+    #[test]
+    fn deep_trees_convert_and_drop_without_recursion() {
+        std::thread::Builder::new()
             .stack_size(TEST_STACK)
             .spawn(|| {
-                // A 100_000-deep `%inc` chain, built iteratively.
-                let mut chain = Nasm::Op(Op::Slot(Atom::from(1u64)));
-                for _ in 0..DEPTH {
-                    chain = Nasm::Op(Op::Inc(Box::new(chain)));
-                }
-                let want = crate::lower(None, &chain).expect("lowers");
-
-                // Annotate, project, renumber, and lower at depth: all
-                // explicit stacks. The IR's derived `PartialEq` recurses
-                // (documented), so agreement is checked through nouns,
-                // whose equality is iterative.
-                let annotated = Noted::from_nasm(&chain, 0u32);
-                let stripped = annotated.strip();
-                assert_eq!(crate::lower(None, &stripped).expect("lowers"), want);
-                assert_eq!(lower(None, &annotated).expect("lowers"), want);
-                let renumbered = annotated.map_note(|n| n + 1);
-                assert_eq!(lower(None, &renumbered).expect("lowers"), want);
-                drop(stripped);
-                drop(renumbered);
-                drop(annotated);
-                drop(chain);
-
-                // A chain built directly as `Noted`, so the teardown is
-                // exercised independently of the conversions.
-                let mut direct = Noted {
-                    note: 0usize,
-                    node: NasmOf::Op(OpOf::Self_),
-                };
-                for i in 1..=DEPTH {
-                    direct = Noted {
-                        note: i,
-                        node: NasmOf::Op(OpOf::Inc(Box::new(direct))),
-                    };
-                }
-                drop(direct);
-
-                // Depth through the other child positions too: cell
-                // heads and `#let` bodies.
-                let mut cells = Noted {
-                    note: (),
-                    node: NasmOf::Atom(Atom::ZERO),
-                };
-                let mut lets = Noted {
-                    note: (),
-                    node: NasmOf::Atom(Atom::ZERO),
-                };
-                for _ in 0..DEPTH {
-                    cells = Noted {
-                        note: (),
-                        node: NasmOf::Cell {
-                            first: Box::new(cells),
-                            second: Box::new(Noted {
-                                note: (),
-                                node: NasmOf::Atom(Atom::ZERO),
-                            }),
-                            rest: vec![],
-                        },
-                    };
-                    lets = Noted {
-                        note: (),
-                        node: NasmOf::Let {
-                            name: Name::new("x").unwrap(),
-                            value: Box::new(Noted {
-                                note: (),
-                                node: NasmOf::Atom(Atom::ZERO),
-                            }),
-                            body: Box::new(lets),
-                        },
-                    };
-                }
-                let plain = cells.strip();
-                drop(cells);
-                drop(plain);
-                let plain = lets.strip();
-                drop(lets);
-                drop(plain);
+                let depth = 200_000;
+                let ours = deep(depth);
+                let relabelled = ours.map_note(|n| n + 1);
+                assert_eq!(relabelled.notes().len(), depth + 2);
+                let bare = ours.strip().expect("strips");
+                let again = Noted::dress(&bare, 0u8);
+                assert_eq!(again.notes().len(), depth + 2);
+                drop(again);
+                drop(relabelled);
+                drop(ours);
+                drop(bare);
             })
-            .expect("thread spawns");
-        handle
+            .expect("spawn")
             .join()
-            .expect("no stack overflow on deep annotated IR");
+            .expect("no overflow");
     }
 }

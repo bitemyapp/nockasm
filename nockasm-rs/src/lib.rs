@@ -49,8 +49,9 @@
 //! intended embedder) construct [`Program`] values directly and get the
 //! same guarantees without going through text. A compiler that needs
 //! to carry source positions or provenance on its IR uses [`noted`]:
-//! the same vocabulary generic over its child type, with a projection
-//! back to [`Nasm`] that is the conformance contract.
+//! the reference vocabulary in its own untyped shape, generic over its
+//! recursion, with a checked projection back to [`Nasm`] that is the
+//! conformance contract.
 //!
 //! # Example
 //!
