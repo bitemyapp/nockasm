@@ -414,6 +414,12 @@ pub(crate) struct CellData {
     head: Noun,
     tail: Noun,
     hash: u64,
+    /// The Hoon `+mug`, computed on first use and kept (0 = not yet;
+    /// a mug is never 0). A noun with heavy internal sharing — a
+    /// kernel core, whose every gate carries the kernel — is mugged
+    /// in one walk of the DAG this way, as a runtime that keeps the
+    /// mug in the cell does, where a walk of the tree is exponential.
+    mug: std::sync::atomic::AtomicU32,
 }
 
 /// Borrowed view of a noun for pattern matching.
@@ -423,6 +429,58 @@ pub enum NounRef<'a> {
     Atom(&'a Atom),
     /// The noun is a cell `[head tail]`.
     Cell(&'a Noun, &'a Noun),
+}
+
+/// murmur3 (32-bit) over `data` with `seed`.
+pub fn murmur3_32(data: &[u8], seed: u32) -> u32 {
+    let c1: u32 = 0xcc9e_2d51;
+    let c2: u32 = 0x1b87_3593;
+    let mut h = seed;
+    let chunks = data.chunks_exact(4);
+    let rem = chunks.remainder();
+    for c in chunks {
+        let mut k = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        k = k.wrapping_mul(c1);
+        k = k.rotate_left(15);
+        k = k.wrapping_mul(c2);
+        h ^= k;
+        h = h.rotate_left(13);
+        h = h.wrapping_mul(5).wrapping_add(0xe654_6b64);
+    }
+    let mut k: u32 = 0;
+    for (i, &b) in rem.iter().enumerate() {
+        k ^= u32::from(b) << (8 * i);
+    }
+    if !rem.is_empty() {
+        k = k.wrapping_mul(c1);
+        k = k.rotate_left(15);
+        k = k.wrapping_mul(c2);
+        h ^= k;
+    }
+    h ^= data.len() as u32;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// `+mum`: the 31-bit fold with the retry on zero, `fal` after eight.
+fn mum(syd: u32, fal: u32, key: &[u8]) -> u32 {
+    // the key's significant bytes only (an atom's byte length)
+    let end = key.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let key = &key[..end];
+    let mut s = syd;
+    for _ in 0..8 {
+        let haz = murmur3_32(key, s);
+        let ham = (haz >> 31) ^ (haz & 0x7fff_ffff);
+        if ham != 0 {
+            return ham;
+        }
+        s = s.wrapping_add(1);
+    }
+    fal
 }
 
 fn splitmix(mut z: u64) -> u64 {
@@ -443,7 +501,12 @@ impl Noun {
         let head = head.into();
         let tail = tail.into();
         let hash = splitmix(head.hash64() ^ splitmix(tail.hash64() ^ 0xce11));
-        Noun(NounRepr::Cell(P::new(CellData { head, tail, hash })))
+        Noun(NounRepr::Cell(P::new(CellData {
+            head,
+            tail,
+            hash,
+            mug: std::sync::atomic::AtomicU32::new(0),
+        })))
     }
 
     /// Right-associate `elems` into nested cells: `[a b c]` = `[a [b c]]`.
@@ -460,6 +523,47 @@ impl Noun {
             acc = Noun::cell(e, acc);
         }
         Some(acc)
+    }
+
+    /// The Hoon `+mug` of this noun: murmur3 (seed `0xcafebabe` over an
+    /// atom's bytes, `0xdeadbeef` over a cell's pair of mugs), folded to
+    /// 31 bits with the kernel's zero-avoiding retry. Cell mugs are
+    /// cached in the cell, so a shared subtree is hashed once.
+    pub fn mug(&self) -> u32 {
+        use std::sync::atomic::Ordering;
+        match &self.0 {
+            NounRepr::Atom(a) => mum(0xcafe_babe, 0x7fff, &a.le_bytes()),
+            NounRepr::Cell(c) => {
+                let m = c.mug.load(Ordering::Relaxed);
+                if m != 0 {
+                    return m;
+                }
+                // an explicit post-order walk: deep nouns must not recurse
+                let mut stack: Vec<(&Noun, bool)> = vec![(self, false)];
+                while let Some((n, ready)) = stack.pop() {
+                    let NounRepr::Cell(c) = &n.0 else { continue };
+                    if c.mug.load(Ordering::Relaxed) != 0 {
+                        continue;
+                    }
+                    if ready {
+                        let h = c.head.mug();
+                        let t = c.tail.mug();
+                        let k = u64::from(h) | (u64::from(t) << 32);
+                        let m = mum(0xdead_beef, 0xfffe, &k.to_le_bytes());
+                        c.mug.store(m, Ordering::Relaxed);
+                    } else {
+                        stack.push((n, true));
+                        if let NounRepr::Cell(_) = &c.tail.0 {
+                            stack.push((&c.tail, false));
+                        }
+                        if let NounRepr::Cell(_) = &c.head.0 {
+                            stack.push((&c.head, false));
+                        }
+                    }
+                }
+                c.mug.load(Ordering::Relaxed)
+            }
+        }
     }
 
     /// View for pattern matching.
