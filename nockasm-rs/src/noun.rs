@@ -202,6 +202,7 @@ impl Atom {
     }
 
     /// A deterministic 64-bit structural hash (FNV-1a over the bytes).
+    #[inline]
     pub(crate) fn hash64(&self) -> u64 {
         // a small atom is one mix (an interpreter hashes one per cell
         // it builds); a big one is FNV over its bytes. The two ranges
@@ -606,6 +607,7 @@ impl Noun {
         matches!(self.0, NounRepr::Cell(_))
     }
 
+    #[inline]
     pub(crate) fn hash64(&self) -> u64 {
         match &self.0 {
             NounRepr::Atom(a) => a.hash64(),
@@ -669,7 +671,25 @@ impl PartialEq for Noun {
     /// past a small number of nodes, so equality of small nouns stays
     /// allocation-free.
     fn eq(&self, other: &Self) -> bool {
-        let mut stack: Vec<(&Noun, &Noun)> = vec![(self, other)];
+        // the roots first, without a stack: most comparisons an
+        // interpreter makes end here (two atoms, one shared cell, or
+        // two cells whose cached hashes differ)
+        let (x, y) = match (&self.0, &other.0) {
+            (NounRepr::Atom(x), NounRepr::Atom(y)) => return x == y,
+            (NounRepr::Cell(x), NounRepr::Cell(y)) => {
+                if P::ptr_eq(x, y) {
+                    return true;
+                }
+                if x.hash != y.hash {
+                    return false;
+                }
+                (x, y)
+            }
+            _ => return false,
+        };
+        let mut stack: Vec<(&Noun, &Noun)> = Vec::with_capacity(16);
+        stack.push((&x.tail, &y.tail));
+        stack.push((&x.head, &y.head));
         let mut seen: Option<Seen> = None;
         let mut steps: usize = 0;
         while let Some((a, b)) = stack.pop() {
@@ -751,8 +771,13 @@ impl Drop for Noun {
         let Some(cell) = P::into_inner(rc) else {
             return; // shared: the count just dropped, nothing to tear down
         };
-        let mut stack = vec![cell];
-        while let Some(cell) = stack.pop() {
+        // the next cell to tear down rides in a local; the stack is
+        // allocated only when both children of a cell are unshared
+        // cells (an interpreter frees a cell per step, and a Vec per
+        // free was most of the cost of freeing)
+        let mut next = Some(cell);
+        let mut stack: Vec<CellData> = Vec::new();
+        while let Some(cell) = next.take() {
             let CellData { head, tail, .. } = cell;
             for mut child in [head, tail] {
                 if matches!(child.0, NounRepr::Atom(_)) {
@@ -763,8 +788,15 @@ impl Drop for Noun {
                     continue;
                 };
                 if let Some(inner) = P::into_inner(rc) {
-                    stack.push(inner);
+                    if next.is_none() {
+                        next = Some(inner);
+                    } else {
+                        stack.push(inner);
+                    }
                 }
+            }
+            if next.is_none() {
+                next = stack.pop();
             }
         }
     }
